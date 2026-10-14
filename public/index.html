@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reno Toolbox</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 3h18v18H3zM3 12h9M12 3v12' fill='none' stroke='%232563eb' stroke-width='2.5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 3h18v18H3zM3 12h9M12 3v12" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>
+      <span>Reno Toolbox</span>
+    </div>
+    <input id="design-name" class="design-name" type="text" aria-label="Plan name" maxlength="200">
+    <span id="dirty" class="status"></span>
+    <div class="actions">
+      <button id="btn-new" title="Start a new plan">New</button>
+      <button id="btn-open" title="Open a saved plan">Open…</button>
+      <button id="btn-save" class="primary" title="Save (Ctrl+S)">Save</button>
+      <button id="btn-save-as" title="Save a copy (Ctrl+Shift+S)">Save as…</button>
+      <button id="btn-export" title="Download the plan as JSON">Export</button>
+      <button id="btn-import" title="Load a plan from a JSON file">Import</button>
+      <input id="import-file" type="file" accept="application/json,.json" hidden>
+    </div>
+    <span class="spacer"></span>
+    <button id="btn-undo" class="icon" title="Undo (Ctrl+Z)">↶</button>
+    <button id="btn-redo" class="icon" title="Redo (Ctrl+Shift+Z)">↷</button>
+    <div id="units" class="segmented" role="group" aria-label="Units">
+      <button data-units="imperial">ft · in</button>
+      <button data-units="metric">metric</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <nav class="toolbar">
+      <div id="tools"></div>
+      <div class="zoom">
+        <button id="zoom-in" class="icon" title="Zoom in">+</button>
+        <button id="zoom-out" class="icon" title="Zoom out">−</button>
+        <button id="zoom-fit" class="icon" title="Fit plan (F)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+      </div>
+    </nav>
+
+    <section class="workspace">
+      <div class="tabs" role="tablist">
+        <button data-tab="plan" class="active">Plan</button>
+        <button data-tab="elevations">Elevations</button>
+        <button data-tab="takeoff">Takeoff</button>
+      </div>
+      <div class="view" id="view-plan">
+        <svg id="plan" data-tool="select"></svg>
+        <div class="compass" title="Plan north is up">N<span>↑</span></div>
+      </div>
+      <div class="view scroll" id="view-elevations" hidden></div>
+      <div class="view scroll" id="view-takeoff" hidden></div>
+    </section>
+
+    <aside id="inspector" class="inspector"></aside>
+  </div>
+
+  <footer class="statusbar">
+    <span id="hint"></span>
+    <span id="coords"></span>
+  </footer>
+
+  <dialog id="open-dialog">
+    <form method="dialog" class="dialog-head">
+      <h2>Saved plans</h2>
+      <button class="icon" aria-label="Close">✕</button>
+    </form>
+    <div id="design-list" class="design-list"></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
