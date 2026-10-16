@@ -125,6 +125,8 @@ button.link:hover { text-decoration: underline; background: none; }
 #plan { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; cursor: default; }
 #plan[data-tool="wall"], #plan[data-tool="rect"] { cursor: crosshair; }
 #plan[data-tool="door"], #plan[data-tool="window"], #plan[data-tool="opening"] { cursor: copy; }
+#plan[data-tool="pan"] { cursor: grab; }
+#plan.panning { cursor: grabbing; }
 .grid-minor { stroke: #eceef2; stroke-width: 1; }
 .grid-major { stroke: #dcdfe5; stroke-width: 1; }
 .room { fill: var(--room); stroke: none; }
@@ -162,6 +164,7 @@ button.link:hover { text-decoration: underline; background: none; }
 .preview-size { fill: var(--accent); font-weight: 650; }
 .preview-size.sub { font-weight: 400; }
 .preview-opening { stroke: rgba(37, 99, 235, 0.45); }
+.preview-opening.blocked { stroke: rgba(220, 38, 38, 0.45); }
 .guide { stroke: #f97316; }
 .marquee { fill: rgba(37, 99, 235, 0.08); stroke: var(--accent); }
 .marquee.crossing { fill: rgba(22, 163, 74, 0.08); stroke: #16a34a; }

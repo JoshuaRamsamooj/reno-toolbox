@@ -6,8 +6,8 @@ import {
   add, compassName, dist, dot, closestPointOnSegment, cross, labelPoint, norm, offsetPolygon,
   perp, pointInPolygon, polygonArea, polygonPerimeter, projectParam, scale, segmentIntersection, sub,
 } from './geometry.js';
-import { unitDefaults } from './units.js';
-import { ceilingModel, defaultCeiling, resolveCeiling, wallTopProfile } from './ceiling.js';
+import { MM_PER_IN, formatLength, unitDefaults } from './units.js';
+import { ceilingModel, defaultCeiling, profileHeightAt, resolveCeiling, wallTopProfile } from './ceiling.js';
 import { bulkheadDefaults, faceBands, findBulkheadFace, resolveBulkheads } from './bulkhead.js';
 
 export const EPS = 1; // mm: nodes closer than this are the same point
@@ -141,7 +141,206 @@ export function addOpening(d, wallId, type, offset, overrides = {}) {
   };
   d.openings.push(o);
   clampOpenings(d);
+  const problem = openingProblem(d, o);
+  if (problem) {
+    d.openings.pop();
+    throw new Error(problem);
+  }
   return o;
+}
+
+const OVERLAP_TOLERANCE = 0.5; // mm: openings that merely touch don't overlap
+const MIN_NEW_OPENING = 150; // mm: don't squeeze in an opening shorter than this
+
+function overlapsAlong(a, b) {
+  return a.offset - a.width / 2 < b.offset + b.width / 2 - OVERLAP_TOLERANCE
+    && b.offset - b.width / 2 < a.offset + a.width / 2 - OVERLAP_TOLERANCE;
+}
+
+function openingTop(o) {
+  return (o.type === 'window' ? o.sill : 0) + o.height;
+}
+
+/**
+ * True when two openings on the same wall occupy the same space. They may
+ * share a stretch of wall only if both are windows stacked one above the
+ * other, with the lower window's top strictly below the upper one's sill.
+ */
+export function openingsConflict(a, b) {
+  if (a.id === b.id || a.wallId !== b.wallId || !overlapsAlong(a, b)) return false;
+  if (a.type !== 'window' || b.type !== 'window') return true;
+  const [lower, upper] = a.sill <= b.sill ? [a, b] : [b, a];
+  return !(lower.sill + lower.height < upper.sill);
+}
+
+/** The first opening that o would overlap, or null when it fits. */
+export function findOpeningConflict(d, o) {
+  return d.openings.find((other) => openingsConflict(o, other)) ?? null;
+}
+
+/**
+ * What's overhead along a wall, from the rooms either side, in the wall's
+ * own offset coordinates (from end A):
+ *   ceilings:  one top-of-wall profile [{s, z}] per room face (s = offset)
+ *   bulkheads: [{ o0, o1, bottom }] stretches under a bulkhead
+ * A wall that bounds no room is limited by the default ceiling height.
+ */
+export function wallHeadroom(d, wallId, analysis = analyze(d)) {
+  const idx = indexDesign(d);
+  const w = idx.walls.get(wallId);
+  const flat = [[{ s: 0, z: d.settings.ceilingHeight }]];
+  if (!w) return { ceilings: flat, bulkheads: [] };
+  const A = idx.nodes.get(w.a);
+  const wd = norm(sub(idx.nodes.get(w.b), A));
+  const ceilings = [];
+  const bulkheads = [];
+  for (const g of analysis.rooms) {
+    if (!g.wallIds.includes(wallId)) continue;
+    for (const face of roomElevations(d, g).walls) {
+      if (!face.wallIds.includes(wallId)) continue;
+      // Same projection roomGeometry uses to place openings on the face.
+      const sign = dot(wd, face.dir) > 0 ? 1 : -1;
+      const base = dot(sub(A, face.P), face.dir);
+      const toOffset = (s) => (s - base) * sign;
+      ceilings.push(face.profile.map((pt) => ({ s: toOffset(pt.s), z: pt.z })).sort((p, q) => p.s - q.s));
+      for (const band of face.bands) {
+        const a = toOffset(band.s0);
+        const b = toOffset(band.s1);
+        bulkheads.push({ o0: Math.min(a, b), o1: Math.max(a, b), bottom: band.bottom });
+      }
+    }
+  }
+  return { ceilings: ceilings.length ? ceilings : flat, bulkheads };
+}
+
+/** Lowest ceiling over o's stretch of wall. */
+function ceilingLimit(o, headroom) {
+  const o0 = o.offset - o.width / 2;
+  const o1 = o.offset + o.width / 2;
+  let limit = Infinity;
+  for (const profile of headroom.ceilings) {
+    // Profiles are piecewise linear, so the minimum is at an end or a kink.
+    for (const s of [o0, o1, ...profile.map((pt) => pt.s).filter((s) => s > o0 && s < o1)]) {
+      limit = Math.min(limit, profileHeightAt(profile, s));
+    }
+  }
+  return limit;
+}
+
+/** Lowest bulkhead underside over o's stretch of wall (Infinity if none). */
+function bulkheadLimit(o, headroom) {
+  let limit = Infinity;
+  for (const b of headroom.bulkheads) {
+    if (o.offset - o.width / 2 < b.o1 - OVERLAP_TOLERANCE && b.o0 < o.offset + o.width / 2 - OVERLAP_TOLERANCE) limit = Math.min(limit, b.bottom);
+  }
+  return limit;
+}
+
+/**
+ * Why o can't be where it is (overlapping another opening, or its top
+ * above a bulkhead or the ceiling), or null when it fits.
+ */
+export function openingProblem(d, o, headroom = wallHeadroom(d, o.wallId)) {
+  const other = findOpeningConflict(d, o);
+  const what = OPENING_TYPES[o.type].toLowerCase();
+  if (other) {
+    return o.type === 'window' && other.type === 'window'
+      ? 'it would overlap a window; stacked windows must clear each other vertically (lower sill + height below the upper sill)'
+      : `the ${what} would overlap an existing ${OPENING_TYPES[other.type].toLowerCase()}`;
+  }
+  const bulkhead = bulkheadLimit(o, headroom);
+  const ceiling = ceilingLimit(o, headroom);
+  if (openingTop(o) <= Math.min(bulkhead, ceiling) + OVERLAP_TOLERANCE) return null;
+  return bulkhead < ceiling
+    ? `the top of the ${what} would be above the bulkhead (its underside is at ${formatLength(bulkhead, d.units)})`
+    : `the top of the ${what} would be above the ceiling (${formatLength(ceiling, d.units)} there)`;
+}
+
+/** Every opening that doesn't fit: Map of id → problem message. */
+export function openingProblems(d) {
+  const analysis = analyze(d);
+  const headroomByWall = new Map();
+  const out = new Map();
+  for (const o of d.openings) {
+    if (!headroomByWall.has(o.wallId)) headroomByWall.set(o.wallId, wallHeadroom(d, o.wallId, analysis));
+    const problem = openingProblem(d, o, headroomByWall.get(o.wallId));
+    if (problem) out.set(o.id, problem);
+  }
+  return out;
+}
+
+/**
+ * The first problem in d that wasn't in `before` (from openingProblems), or
+ * null. Edits are refused when they'd leave an opening that doesn't fit,
+ * without blocking unrelated edits to plans that already have one.
+ */
+export function newOpeningProblem(before, d) {
+  for (const [id, problem] of openingProblems(d)) if (!before.has(id)) return problem;
+  return null;
+}
+
+/**
+ * Sill and height for a new opening clicked at `offset`: the defaults,
+ * shortened to fit under the ceiling and any bulkhead there. A window
+ * clicked onto other windows stacks just above them. Returns
+ * { sill, height }, or { blocked } with a message when it can't fit.
+ */
+export function newOpeningPlacement(d, type, wallId, offset, width) {
+  const def = unitDefaults(d.units)[type];
+  const probe = { id: null, wallId, type, offset, width, height: def.height, sill: type === 'window' ? def.sill : 0 };
+  let stacked = false;
+  if (findOpeningConflict(d, probe)) {
+    const under = d.openings.filter((o) => o.wallId === wallId && overlapsAlong(o, probe));
+    const blocker = type === 'window' ? under.find((o) => o.type !== 'window') : under[0];
+    if (blocker) return { blocked: `There's already a ${OPENING_TYPES[blocker.type].toLowerCase()} there` };
+    probe.sill = Math.max(...under.map(openingTop)) + (d.units === 'metric' ? 10 : MM_PER_IN);
+    stacked = true;
+  }
+  const headroom = wallHeadroom(d, wallId);
+  const bulkhead = bulkheadLimit(probe, headroom);
+  const ceiling = ceilingLimit(probe, headroom);
+  const height = Math.min(def.height, Math.min(bulkhead, ceiling) - probe.sill);
+  if (height >= MIN_NEW_OPENING) return { sill: probe.sill, height };
+  if (bulkhead < ceiling) return { blocked: 'A bulkhead is in the way there' };
+  return { blocked: stacked ? 'No room above that window for another one' : 'Not enough headroom under the ceiling there' };
+}
+
+/**
+ * The offset nearest `desired` at which o fits on its wall: not
+ * overlapping another opening, and under any bulkhead and the ceiling.
+ * Null if it fits nowhere.
+ */
+export function freeOpeningOffset(d, o, desired, L) {
+  const headroom = wallHeadroom(d, o.wallId);
+  const lo = o.width / 2;
+  const hi = L - o.width / 2;
+  const fits = (offset) => offset >= lo - 1e-6 && offset <= hi + 1e-6 && !openingProblem(d, { ...o, offset }, headroom);
+  const clamped = Math.min(Math.max(desired, lo), hi);
+  if (fits(clamped)) return clamped;
+  // Otherwise butt it up against a neighbour, a bulkhead, or the point
+  // where a sloped ceiling comes down to the top of the opening.
+  const half = o.width / 2;
+  const candidates = [lo, hi];
+  for (const other of d.openings) {
+    if (other.id === o.id || other.wallId !== o.wallId) continue;
+    candidates.push(other.offset - other.width / 2 - half, other.offset + other.width / 2 + half);
+  }
+  for (const b of headroom.bulkheads) candidates.push(b.o0 - half, b.o1 + half);
+  const top = openingTop(o);
+  for (const profile of headroom.ceilings) {
+    for (let i = 1; i < profile.length; i++) {
+      const a = profile[i - 1];
+      const b = profile[i];
+      if ((a.z - top) * (b.z - top) >= 0) continue;
+      const s = a.s + ((top - a.z) * (b.s - a.s)) / (b.z - a.z);
+      candidates.push(s - half, s + half);
+    }
+  }
+  let best = null;
+  for (const c of candidates) {
+    if (fits(c) && (best === null || Math.abs(c - desired) < Math.abs(best - desired))) best = c;
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------------------

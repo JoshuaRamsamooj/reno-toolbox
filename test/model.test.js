@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  addOpening, addRectangle, addWallChain, analyze, createDesign, deleteRoom, deleteWall, normalize,
-  roomElevations, setWallLength,
+  addOpening, addRectangle, addWallChain, analyze, createDesign, deleteRoom, deleteWall, freeOpeningOffset, newOpeningPlacement, normalize,
+  openingsConflict, roomElevations, setWallLength,
 } from '../public/js/core/model.js';
 import { MM_PER_FT, MM_PER_IN } from '../public/js/core/units.js';
 
@@ -101,6 +101,58 @@ test('openings follow wall splits and merges', () => {
   const wall = d.walls.find((w) => w.id === door.wallId);
   const a = d.nodes.find((n) => n.id === wall.a);
   near(a.x + door.offset * Math.sign(d.nodes.find((n) => n.id === wall.b).x - a.x), 15 * FT);
+});
+
+test('openings cannot overlap, except windows stacked clear of each other', () => {
+  const d = design();
+  addRectangle(d, { x: 0, y: 0 }, { x: 20 * FT, y: 10 * FT });
+  normalize(d);
+  const wallId = d.walls[0].id;
+  const IN = MM_PER_IN;
+  const win = addOpening(d, wallId, 'window', 5 * FT, { width: 36 * IN, height: 48 * IN, sill: 36 * IN });
+
+  // Anything overlapping along the wall at the same height is refused.
+  for (const type of ['window', 'door', 'opening']) {
+    assert.throws(() => addOpening(d, wallId, type, 6 * FT, { width: 36 * IN }), /overlap/);
+  }
+  assert.equal(d.openings.length, 1);
+
+  // Touching side by side is fine.
+  addOpening(d, wallId, 'door', 5 * FT + 36 * IN, { width: 36 * IN });
+
+  // A window stacked above must start strictly above the lower one's top (84").
+  const above = { id: 'x', wallId, type: 'window', offset: 5 * FT, width: 24 * IN, height: 12 * IN };
+  assert.ok(openingsConflict(win, { ...above, sill: 84 * IN }));
+  assert.ok(!openingsConflict(win, { ...above, sill: 85 * IN }));
+  assert.ok(openingsConflict(win, { ...above, type: 'door', sill: 0 }));
+  addOpening(d, wallId, 'window', 5 * FT, { width: 24 * IN, height: 10 * IN, sill: 85 * IN }); // top 95", under the 8' ceiling
+  assert.equal(d.openings.length, 3);
+
+  // Dragging slides an opening up against its neighbour instead of into it.
+  const door = addOpening(d, wallId, 'door', 15 * FT, { width: 32 * IN });
+  const L = 20 * FT;
+  near(freeOpeningOffset(d, door, 5 * FT + 40 * IN, L), 5 * FT + 54 * IN + 16 * IN);
+});
+
+test('a window clicked onto a window stacks above it, under the ceiling', () => {
+  const d = design();
+  d.settings.ceilingHeight = 10 * FT;
+  addRectangle(d, { x: 0, y: 0 }, { x: 20 * FT, y: 10 * FT });
+  normalize(d);
+  const wallId = d.walls[0].id;
+  const IN = MM_PER_IN;
+  addOpening(d, wallId, 'window', 5 * FT, { width: 36 * IN }); // default 36" sill, 48" tall → top 84"
+
+  const place = newOpeningPlacement(d, 'window', wallId, 5 * FT, 36 * IN);
+  near(place.sill, 85 * IN);
+  near(place.height, 120 * IN - 85 * IN); // shortened to fit under the 10' ceiling
+  addOpening(d, wallId, 'window', 5 * FT, { width: 36 * IN, ...place });
+  assert.equal(d.openings.length, 2);
+
+  // No room left for a third, and a door is never stacked on.
+  assert.match(newOpeningPlacement(d, 'window', wallId, 5 * FT, 36 * IN).blocked, /No room/);
+  addOpening(d, wallId, 'door', 12 * FT, { width: 32 * IN });
+  assert.match(newOpeningPlacement(d, 'window', wallId, 12 * FT, 36 * IN).blocked, /door/);
 });
 
 test('setWallLength stretches the plan and keeps rooms rectangular', () => {

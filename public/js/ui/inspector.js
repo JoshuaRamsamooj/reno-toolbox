@@ -64,7 +64,7 @@ export class Inspector {
         h('li', {}, 'Click a room to name it and set its ceiling height and profile.'),
         h('li', {}, 'Switch to ', h('b', {}, 'Elevations'), ' or ', h('b', {}, 'Takeoff'), ' at the top of the canvas.'),
       ),
-      h('p', { class: 'muted small' }, 'Select several: drag a box or Shift+click; Ctrl+A selects all; Del deletes. Pan: right-drag, middle mouse or hold Space. Zoom: scroll wheel. Undo: Ctrl+Z.'),
+      h('p', { class: 'muted small' }, 'Select several: drag a box or Shift+click; Ctrl+A selects all; Del deletes. Pan: P, right-drag, middle mouse or hold Space. Zoom: scroll wheel. Undo: Ctrl+Z.'),
     );
   }
 

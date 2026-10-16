@@ -1,6 +1,6 @@
 // Application shell: owns the design, undo history, selection and
 // persistence, and wires the views together.
-import { createDesign, migrateDesign, normalize, deleteNode, deleteOpening, deleteRoom, deleteWall } from './core/model.js';
+import { createDesign, migrateDesign, newOpeningProblem, normalize, openingProblems, deleteNode, deleteOpening, deleteRoom, deleteWall } from './core/model.js';
 import { renderThumbnail } from './core/thumbnail.js';
 import { formatLength } from './core/units.js';
 import { api } from './api.js';
@@ -69,16 +69,24 @@ class App {
     this.redoStack = [];
   }
 
-  /** Applies a mutation as one undoable step, then normalises the plan. */
+  /**
+   * Applies a mutation as one undoable step, then normalises the plan.
+   * Refused if it leaves an opening that doesn't fit (overlapping another,
+   * or above a bulkhead or the ceiling).
+   */
   change(label, fn) {
     const before = this.snapshot();
+    const problems = openingProblems(this.design);
     try {
       fn(this.design);
       normalize(this.design);
+      const problem = newOpeningProblem(problems, this.design);
+      if (problem) throw new Error(problem);
     } catch (err) {
       console.error(err);
       this.design = migrateDesign(JSON.parse(before));
       this.toast(`Couldn't ${label.toLowerCase()}: ${err.message}`, 'error');
+      this.refresh(); // put inputs back to the unchanged values
       return;
     }
     if (this.snapshot() === before) return;
@@ -91,6 +99,7 @@ class App {
   /** Live edits (dragging) mutate in place and are committed by endLive(). */
   beginLive() {
     this.liveBefore = this.snapshot();
+    this.liveProblems = openingProblems(this.design);
   }
 
   live() {
@@ -101,6 +110,14 @@ class App {
     const before = this.liveBefore;
     this.liveBefore = null;
     normalize(this.design);
+    const problem = before && newOpeningProblem(this.liveProblems, this.design);
+    if (problem) {
+      // e.g. a wall shortened until its openings collide: snap back.
+      this.design = migrateDesign(JSON.parse(before));
+      this.toast(`Couldn't ${label.toLowerCase()}: ${problem}`, 'error');
+      this.refresh();
+      return;
+    }
     if (before && this.snapshot() !== before) {
       this.pushUndo(before);
       this.markDirty();
@@ -215,6 +232,7 @@ class App {
   buildToolbar() {
     const icons = {
       select: '<path d="M5 3l14 8-6 1.5L10 19z"/>',
+      pan: '<path d="M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3" stroke-width="2" fill="none"/>',
       wall: '<path d="M3 17V7h6v6h12" stroke-width="3" fill="none"/>',
       rect: '<rect x="4" y="5" width="16" height="14" stroke-width="2.5" fill="none"/>',
       door: '<path d="M4 20h4V6M8 6a12 12 0 0 1 12 12" fill="none" stroke-width="2"/><path d="M3 20h18" stroke-width="2"/>',

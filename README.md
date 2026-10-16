@@ -23,8 +23,9 @@ modules to compile). Environment variables: `PORT` (default 3000), `HOST`
 | Wall | W | Click corners. Type a length (`8'6`, `96"`, `2.4`, `2400mm`) + Enter to place an exact wall in the direction of the mouse. Snaps to 45° (hold Shift for any angle), to corners, to walls and to alignment with other corners. Ending on a wall or corner joins it and finishes the chain. Esc/Enter/double-click also finish. |
 | Door / Window / Opening | D / N / O | Click on a wall. While placing, the distances to the wall ends are shown. |
 | Select | V | Click to select; Shift+click adds or removes. Drag a box over empty floor to select several: left→right picks walls/openings fully inside, right→left picks anything the box touches. Ctrl+A selects everything. Drag corners, walls (perpendicular) or openings (along their wall). Del deletes the whole selection in one undoable step. Double-click focuses the main field in the inspector. |
+| Pan | P | Drag anywhere to move around the plan. |
 
-Other controls: pan by right-dragging, with the middle mouse button or by holding Space; zoom with the
+Other controls: pan with the Pan tool (P), by right-dragging, with the middle mouse button or by holding Space; zoom with the
 scroll wheel; F fits the plan; Ctrl+Z / Ctrl+Shift+Z undo and redo; Ctrl+S saves.
 
 Rooms are **detected automatically** from enclosed areas, so you never have

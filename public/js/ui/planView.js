@@ -4,8 +4,8 @@ import {
   add, closestPointOnSegment, dist, dot, lineIntersection, norm, perp, scale, segmentIntersection, sub,
 } from '../core/geometry.js';
 import {
-  addOpening, addRectangle, addWallChain, analyze, designBounds, findNodeNear, indexDesign, nodeDegrees,
-  openingGeometry, rectangleCorners, resolveRoomCeiling, translateNodes,
+  addOpening, addRectangle, addWallChain, analyze, designBounds, findNodeNear, freeOpeningOffset, newOpeningPlacement,
+  indexDesign, nodeDegrees, openingGeometry, rectangleCorners, resolveRoomCeiling, translateNodes,
 } from '../core/model.js';
 import { ceilingModel } from '../core/ceiling.js';
 import { resolveBulkheads } from '../core/bulkhead.js';
@@ -21,6 +21,7 @@ const TYPABLE = /^[0-9.'"\/\- xXmMcC]$/;
 
 export const TOOLS = {
   select: { label: 'Select', key: 'V', hint: 'Click to select, Shift+click to add · drag a box to select several (→ fully inside, ← touching) · drag corners, walls or openings to move · Del deletes · right-drag or Space+drag pans' },
+  pan: { label: 'Pan', key: 'P', hint: 'Drag to move around the plan · scroll to zoom · Space+drag or right-drag also pans with any tool' },
   wall: { label: 'Wall', key: 'W', hint: 'Click to start, click to add corners · type a length + Enter for exact walls · Shift = free angle · Enter/Esc/double-click to finish' },
   rect: { label: 'Room', key: 'R', hint: 'Drag (or click two corners) to add a rectangular room · type interior size like 12x10 + Enter' },
   door: { label: 'Door', key: 'D', hint: 'Click on a wall to place a door · select it afterwards to flip the swing or change the size' },
@@ -282,7 +283,9 @@ export class PlanView {
     let offset = Math.round((best.t * best.L) / fine) * fine;
     if (Math.abs(offset - best.L / 2) < this.px(8)) offset = best.L / 2;
     offset = Math.min(Math.max(offset, width / 2), best.L - width / 2);
-    return { wallId: best.wall.id, offset, width };
+    // Kept under bulkheads; windows stack above existing windows.
+    const place = newOpeningPlacement(d, this.tool, best.wall.id, offset, width);
+    return { wallId: best.wall.id, offset, width, blocked: null, ...place };
   }
 
   /**
@@ -358,8 +361,9 @@ export class PlanView {
   onPointerDown(e) {
     const raw = this.toWorld(e);
     this.svg.setPointerCapture(e.pointerId);
-    if (e.button === 1 || e.button === 2 || this.app.spaceDown) {
+    if (e.button === 1 || e.button === 2 || this.app.spaceDown || (e.button === 0 && this.tool === 'pan')) {
       this.drag = { type: 'pan', sx: e.clientX, sy: e.clientY, tx: this.view.tx, ty: this.view.ty };
+      this.svg.classList.add('panning');
       return;
     }
     if (e.button !== 0) return;
@@ -395,10 +399,14 @@ export class PlanView {
         this.flash('Click on a wall to place it');
         return;
       }
+      if (target.blocked) {
+        this.flash(target.blocked);
+        return;
+      }
       const type = this.tool;
       let created = null;
       this.app.change(`Add ${type}`, (d) => {
-        created = addOpening(d, target.wallId, type, target.offset, { width: target.width });
+        created = addOpening(d, target.wallId, type, target.offset, { width: target.width, sill: target.sill, height: target.height });
       });
       if (created) this.app.select({ type: 'opening', id: created.id });
       return;
@@ -491,6 +499,9 @@ export class PlanView {
       this.cursor = this.draw ? this.rectCorner(raw, this.draw.start) : this.snap(raw, {});
     } else if (this.tool in { door: 1, window: 1, opening: 1 }) {
       this.cursor = { p: raw, opening: this.openingTarget(raw) };
+    } else if (this.tool === 'pan') {
+      this.hover = null;
+      this.cursor = { p: raw };
     } else {
       const hit = this.hitTest(raw);
       if (JSON.stringify(hit) !== JSON.stringify(this.hover)) this.hover = hit;
@@ -526,13 +537,15 @@ export class PlanView {
       let offset = dot(sub(raw, g.A), g.dir);
       if (!e.shiftKey) offset = Math.round(offset / fine) * fine;
       if (Math.abs(offset - g.length / 2) < this.px(8)) offset = g.length / 2;
-      o.offset = Math.min(Math.max(offset, o.width / 2), g.length - o.width / 2);
+      // Slide up against neighbours rather than overlapping them.
+      o.offset = freeOpeningOffset(d, o, offset, g.length) ?? o.offset;
     }
   }
 
   onPointerUp(e) {
     const dr = this.drag;
     this.drag = null;
+    this.svg.classList.remove('panning');
     if (this.svg.hasPointerCapture(e.pointerId)) this.svg.releasePointerCapture(e.pointerId);
     if (dr?.type === 'marquee') {
       this.marqueeHits = null;
@@ -987,7 +1000,7 @@ export class PlanView {
       const center = add(A, scale(u, c.opening.offset));
       const a = add(center, scale(u, -c.opening.width / 2));
       const b = add(center, scale(u, c.opening.width / 2));
-      out.push(tag('line', { class: 'preview-opening', x1: a.x, y1: a.y, x2: b.x, y2: b.y, 'stroke-width': w.thickness + this.px(4) }, null));
+      out.push(tag('line', { class: `preview-opening${c.opening.blocked ? ' blocked' : ''}`, x1: a.x, y1: a.y, x2: b.x, y2: b.y, 'stroke-width': w.thickness + this.px(4) }, null));
       const off = scale(perp(u), -(w.thickness / 2 + this.px(18)));
       const L1 = dist(A, a);
       const L2 = dist(b, B);
