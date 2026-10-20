@@ -1,5 +1,5 @@
 // Takeoff tab: material list, per-room quantities and estimate settings.
-import { computeTakeoff, resolveEstimate, takeoffToCsv } from '../core/takeoff.js';
+import { COUNT_UNITS, computeTakeoff, resolveEstimate, takeoffToCsv } from '../core/takeoff.js';
 import { MM_PER_FT, areaUnit, areaValue, formatLength, lengthValue } from '../core/units.js';
 import { checkbox, field, h, lengthInput, numberInput, select } from './dom.js';
 
@@ -31,7 +31,7 @@ export class TakeoffView {
       h('thead', {}, h('tr', {}, h('th', {}, 'Material'), h('th', { class: 'num' }, 'Quantity'), h('th', {}, 'Unit'), h('th', {}, 'Basis'))),
       h('tbody', {}, t.materials.map((m) => h('tr', {},
         h('td', {}, h('span', { class: `cat cat-${m.category.toLowerCase()}` }, m.category), ' ', m.label),
-        h('td', { class: 'num' }, m.unit === 'sheets' ? String(m.quantity) : m.quantity.toFixed(1)),
+        h('td', { class: 'num' }, COUNT_UNITS.has(m.unit) ? String(m.quantity) : m.quantity.toFixed(1)),
         h('td', {}, m.unit),
         h('td', { class: 'muted small' }, m.detail)))),
     );

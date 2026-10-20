@@ -24,6 +24,7 @@ modules to compile). Environment variables: `PORT` (default 3000), `HOST`
 | Door / Window / Opening | D / N / O | Click on a wall. While placing, the distances to the wall ends are shown. |
 | Select | V | Click to select; Shift+click adds or removes. Drag a box over empty floor to select several: left→right picks walls/openings fully inside, right→left picks anything the box touches. Ctrl+A selects everything. Drag corners, walls (perpendicular) or openings (along their wall). Del deletes the whole selection in one undoable step. Double-click focuses the main field in the inspector. |
 | Pan | P | Drag anywhere to move around the plan. |
+| Level | L | Survey a room's subfloor and plan the leveling (see below). |
 
 Other controls: pan with the Pan tool (P), by right-dragging, with the middle mouse button or by holding Space; zoom with the
 scroll wheel; F fits the plan; Ctrl+Z / Ctrl+Shift+Z undo and redo; Ctrl+S saves.
@@ -58,6 +59,60 @@ The inspector edits the selection:
 Units can be switched between imperial and metric at any time. All geometry is
 stored in millimetres; only the display changes.
 
+## Floor leveling
+
+The Level tool (L) overlays a survey grid on the selected room (1'–3' or
+0.5–1 m spacing, centred and kept off the walls). Columns are lettered
+west → east and rows numbered north → south, so every node has a name like
+`C4`.
+
+- **Survey:** readings are relative to your benchmark (+ high, − low). The
+  entry bar under the plan has one-tap presets (`+1` `+3/4` `+1/2` `+1/4` `+1/8`
+  `0` … `-1` inches, or `±20` `15` `10` `6` `3` `0` mm). Tap one and it is saved
+  to the current node. For anything else, type the value in the bar's box or
+  straight onto the plan (`3/8`, `-5/16"`, `4mm` etc.), then Enter. Quick entry
+  jumps to the next node in walking order (row 1 west → east, row 2 back), so a
+  whole grid goes in one go. With no node active, entry starts at the first
+  empty one. Tab/Shift+Tab skip, arrows move, Del clears a reading, Esc stops.
+  Bare numbers are inches on imperial plans and mm on metric ones; the panel can
+  switch them.
+- **Heatmap:** the readings are interpolated (inverse-distance weighting) and
+  drawn on the plan relative to the target: yellow → red where you grind, light
+  blue → navy where you pour, green within tolerance. Numbers on the plan show
+  each node's deviation from the target (+ grind, − pour) and can be turned off.
+- **Target & tolerance:** pick a flatness spec (3/16" in 10', 1/8" in 6', 1/4"
+  in 10'). Keeping every point within ±half of it guarantees no straightedge gap
+  exceeds the spec. The target slider previews live. By default the target follows
+  the recommendation.
+- **Optimize for:** choose **Minimize grinding** (pour up to the highest spot)
+  or **Minimize pour** (grind down to the lowest spot so no compound is needed).
+  Both plans are shown side by side with their target, grind area, deepest cut
+  and bags, and both are held under the clearance locks. Grinding only shrinks
+  as the target rises and pouring only grows, so each optimum is the highest
+  (or lowest) target the readings and locks allow.
+- **Clearance locks:** cap how far the floor may rise at a door or opening (above
+  the existing floor there) or anywhere in the room (above the benchmark). When
+  a lock is below the fill-only target, the recommendation drops to the lock and
+  switches to grinding the high spots. A target above a lock is flagged as a breach.
+- **Connected rooms:** rooms joined by a door or cased opening are leveled
+  as one floor once they have readings. They share one continuous heatmap,
+  one target and tolerance (taken from the first of them), and each other's
+  clearance locks, and the action plan and bag count cover them together.
+  Each room keeps its own grid, so linking never moves readings. Readings in
+  linked rooms must come from the same benchmark. Quick entry carries on into
+  the next connected room when a room is done. Untick "Level with rooms
+  connected by doors or openings" in a room's panel to level it on its own. The
+  Takeoff splits linked quantities per room by area.
+- **Action plan:** total grind area with the maximum cut, total fill area with the
+  average fill, and a numbered list of grind spots (`G1`, `G2`…, also marked on the
+  plan) with the nodes they cover and their distance from the west and north walls.
+- **Compound:** choose Custom Building Products LevelQuik RS, MAPEI Ultraplan 1 Plus,
+  ARDEX K 15 or a custom product. Each has a yield curve: bag volume over the
+  neat range, plus extra yield when extended with aggregate for deep pours. The
+  panel reports "You need **X bags** of compound (includes 10% contingency)" (the
+  contingency is adjustable), and the bags and grinding also appear in the Takeoff.
+  The product figures are nominal data-sheet values, so check them against the bag.
+
 ## Views
 
 - **Plan:** top-down drawing with interior dimensions for every wall face,
@@ -88,6 +143,7 @@ public/js/core/    Pure, DOM-free logic (shared by the browser and the tests)
   model.js         planar wall graph, normalisation, face/room detection, edit ops
   ceiling.js       ceiling profiles → height field, wall-top profiles, surface area
   bulkhead.js      bulkhead footprints, covered wall bands, finished surfaces
+  leveling.js      survey grid, interpolated floor surface, cut/fill plan, compound yield
   takeoff.js       quantities and material list
 public/js/ui/      SVG plan editor, elevations, inspector, takeoff view
 test/              node:test suites for core logic and the API
@@ -97,7 +153,7 @@ test/              node:test suites for core logic and the API
 
 A design is a planar graph: `nodes` (points, in mm) joined by `walls`
 (centrelines with thickness). `openings` sit on a wall at an `offset` from
-its start node. `rooms` hold only user metadata (name, ceiling, finishes) and
+its start node. `rooms` hold only user metadata (name, ceiling, finishes, leveling survey) and
 are matched to the graph's faces on every edit, first by wall set and then by
 an anchor point. After each edit, `normalize()` keeps the graph planar: it
 splits walls at T-junctions and crossings, merges duplicate and collinear

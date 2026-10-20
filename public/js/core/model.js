@@ -50,6 +50,12 @@ export function migrateDesign(raw) {
     r.crown ??= false;
     r.flooring ??= true;
     r.bulkheads = Array.isArray(r.bulkheads) ? r.bulkheads : [];
+    if (r.leveling && typeof r.leveling === 'object') {
+      r.leveling.readings = Array.isArray(r.leveling.readings) ? r.leveling.readings.filter((p) => [p?.x, p?.y, p?.z].every(Number.isFinite)) : [];
+      r.leveling.locks = Array.isArray(r.leveling.locks) ? r.leveling.locks : [];
+    } else {
+      delete r.leveling;
+    }
   });
   return d;
 }

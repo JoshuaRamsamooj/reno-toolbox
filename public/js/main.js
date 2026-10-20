@@ -34,7 +34,10 @@ class App {
 
     this.on('change', () => this.refresh());
     this.on('selection', () => this.refresh());
-    this.on('tool', (tool) => this.updateToolbar(tool));
+    this.on('tool', (tool) => {
+      this.updateToolbar(tool);
+      this.inspector.render();
+    });
     this.on('focus-inspector', (hit) => this.inspector.focus(hit));
     this.on('cursor', (p) => {
       $('#coords').textContent = p ? `${formatLength(p.x, this.design.units, { precision: 'label' })}, ${formatLength(p.y, this.design.units, { precision: 'label' })}` : '';
@@ -238,6 +241,7 @@ class App {
       door: '<path d="M4 20h4V6M8 6a12 12 0 0 1 12 12" fill="none" stroke-width="2"/><path d="M3 20h18" stroke-width="2"/>',
       window: '<rect x="3" y="9" width="18" height="6" fill="none" stroke-width="2"/><path d="M3 12h18" stroke-width="1.5"/>',
       opening: '<path d="M3 12h5M16 12h5M8 8v8M16 8v8" stroke-width="2.5" fill="none"/>',
+      level: '<rect x="2" y="8" width="20" height="8" rx="2" fill="none" stroke-width="2"/><rect x="9.5" y="10" width="5" height="4" rx="1" stroke="none"/><path d="M7 8v3M17 8v3" stroke-width="1.5"/>',
     };
     const bar = $('#tools');
     for (const [key, tool] of Object.entries(TOOLS)) {

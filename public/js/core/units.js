@@ -125,6 +125,49 @@ export function parseDimensions(input, units) {
   return a != null && b != null ? [a, b] : null;
 }
 
+/**
+ * Parses a signed level deviation such as "+4", "-6mm", "−3/16", "1/4\"",
+ * "0.5cm" into millimetres. Explicit units win; bare numbers are read in
+ * `readingUnit` ('mm' or 'in'). Returns null when unparseable.
+ */
+export function parseDeviation(input, readingUnit) {
+  if (input == null) return null;
+  let s = String(input).trim().toLowerCase().replace(/[−–]/g, '-').replace(/[″”]|''/g, '"');
+  if (!s) return null;
+  let sign = 1;
+  if (s[0] === '+' || s[0] === '-') {
+    sign = s[0] === '-' ? -1 : 1;
+    s = s.slice(1).trim();
+  }
+  const m = s.match(/^(.+?)\s*(mm|cm|m|in|inch|inches|")?$/);
+  if (!m) return null;
+  const v = parseMixedNumber(m[1]);
+  if (!Number.isFinite(v)) return null;
+  const unit = m[2] ?? (readingUnit === 'in' ? 'in' : 'mm');
+  const mm = unit === 'mm' ? v : unit === 'cm' ? v * 10 : unit === 'm' ? v * 1000 : v * MM_PER_IN;
+  return sign * mm;
+}
+
+/**
+ * Formats a deviation in mm ("+4 mm", "−6.5 mm") or 32nds of an inch
+ * ("+3/16\"", "−1 1/4\""). opts.sign adds "+" to positive values;
+ * opts.compact drops the " mm" suffix for plan labels.
+ */
+export function formatDeviation(mm, readingUnit, opts = {}) {
+  if (mm == null || !Number.isFinite(mm)) return '';
+  const neg = mm < 0;
+  let body;
+  if (readingUnit === 'in') {
+    body = formatImperial(Math.abs(mm), 32);
+  } else {
+    const v = Math.round(Math.abs(mm) * 10) / 10;
+    body = `${v.toFixed(v % 1 ? 1 : 0)}${opts.compact ? '' : ' mm'}`;
+  }
+  const zero = body === '0"' || /^0(\s|$)/.test(body);
+  const sign = zero ? (opts.sign ? '±' : '') : neg ? '−' : opts.sign ? '+' : '';
+  return `${sign}${body}`;
+}
+
 export function areaValue(mm2, units) {
   return units === 'metric' ? mm2 / MM2_PER_M2 : mm2 / MM2_PER_FT2;
 }

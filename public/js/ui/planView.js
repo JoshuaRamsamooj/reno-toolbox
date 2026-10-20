@@ -9,8 +9,11 @@ import {
 } from '../core/model.js';
 import { ceilingModel } from '../core/ceiling.js';
 import { resolveBulkheads } from '../core/bulkhead.js';
-import { MM_PER_IN, formatArea, formatLength, parseDimensions, parseLength, unitDefaults } from '../core/units.js';
+import { MAX_READING, READING_PRESETS, analyzeLeveling, connectedRooms, readingUnit, resolveLeveling, setReading } from '../core/leveling.js';
+import { MM_PER_IN, formatArea, formatDeviation, formatLength, parseDeviation, parseDimensions, parseLength, unitDefaults } from '../core/units.js';
 import { esc, n, pts, tag, uprightAngle } from './svg.js';
+import { renderHeatmap, renderLegend, renderSurvey } from './levelLayer.js';
+import { h } from './dom.js';
 
 const IMPERIAL_STEPS = [0.5, 1, 3, 6, 12, 24, 60, 120, 240, 600, 1200].map((i) => i * MM_PER_IN);
 const IMPERIAL_MAJOR = [12, 60, 120, 600, 1200, 6000].map((i) => i * MM_PER_IN);
@@ -18,6 +21,7 @@ const METRIC_STEPS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
 const METRIC_MAJOR = [1000, 5000, 10000, 50000, 100000];
 const ANGLE_SNAP = (10 * Math.PI) / 180;
 const TYPABLE = /^[0-9.'"\/\- xXmMcC]$/;
+const READING_TYPABLE = /^[0-9.+\-−\/"' mMcCiInN]$/;
 
 export const TOOLS = {
   select: { label: 'Select', key: 'V', hint: 'Click to select, Shift+click to add · drag a box to select several (→ fully inside, ← touching) · drag corners, walls or openings to move · Del deletes · right-drag or Space+drag pans' },
@@ -27,6 +31,7 @@ export const TOOLS = {
   door: { label: 'Door', key: 'D', hint: 'Click on a wall to place a door · select it afterwards to flip the swing or change the size' },
   window: { label: 'Window', key: 'N', hint: 'Click on a wall to place a window · select it afterwards to set width, height and sill' },
   opening: { label: 'Opening', key: 'O', hint: 'Click on a wall to place a cased opening (no door)' },
+  level: { label: 'Level', key: 'L', hint: 'Click a room, then a grid node · tap a preset reading in the bar, or type any value + Enter · quick entry jumps to the next node · Tab skips, arrows move, Del clears, Esc stops' },
 };
 
 export class PlanView {
@@ -41,10 +46,19 @@ export class PlanView {
     this.drag = null;
     this.hover = null;
     this.message = '';
+    // Leveling survey: the node being typed into, the number overlay, auto-advance,
+    // and a target previewed while the inspector slider is dragged.
+    this.levelEntry = null;
+    this.levelNumbers = true;
+    this.levelQuick = true;
+    this.levelPreview = null;
     this.svg.innerHTML = '<g class="grid"></g><g class="world"></g><g class="overlay"></g>';
     this.gridLayer = svg.querySelector('.grid');
     this.worldLayer = svg.querySelector('.world');
     this.overlayLayer = svg.querySelector('.overlay');
+    // Level tool entry bar (preset readings + custom value), docked over the canvas.
+    this.palette = h('div', { class: 'lvl-palette', hidden: true });
+    svg.parentElement.append(this.palette);
     this.bindEvents();
     new ResizeObserver(() => this.render()).observe(svg);
   }
@@ -223,9 +237,315 @@ export class PlanView {
     this.tool = tool;
     this.typed = '';
     this.message = '';
+    this.levelEntry = null;
     this.svg.dataset.tool = tool;
+    if (tool === 'level' && this.app.selection?.type !== 'room') {
+      const g = this.levelRoom(analyze(this.design), true);
+      if (g?.room) this.app.select({ type: 'room', id: g.room.id });
+    }
     this.app.emit('tool', tool);
     this.render();
+  }
+
+  // -------------------------------------------------------------------------
+  // Leveling survey
+
+  /**
+   * Room being surveyed: the selected room (or the room of a selected wall
+   * or opening). With `fallback`, the first room that has readings, else
+   * the first room.
+   */
+  levelRoom(analysis, fallback = false) {
+    const sel = this.app.selection;
+    const d = this.design;
+    let g = null;
+    if (sel?.type === 'room') g = analysis.rooms.find((x) => x.room?.id === sel.id);
+    if (!g && sel?.type === 'wall') g = analysis.rooms.find((x) => x.wallIds.includes(sel.id));
+    if (!g && sel?.type === 'opening') {
+      const o = d.openings.find((x) => x.id === sel.id);
+      g = o && analysis.rooms.find((x) => x.wallIds.includes(o.wallId));
+    }
+    if (!g && fallback) g = analysis.rooms.find((x) => x.room?.leveling?.readings?.length) ?? analysis.rooms[0];
+    return g?.room ? g : null;
+  }
+
+  /**
+   * Leveling analysis for a room (and the rooms linked to it), using the
+   * slider preview target when one is active for its group.
+   */
+  levelAnalysis(g, analysis) {
+    const d = this.design;
+    // Memoised on the whole plan (linked rooms depend on each other): the plan re-renders on every mouse move.
+    const key = JSON.stringify([d.nodes, d.walls, d.openings, d.rooms, d.estimate, d.units, this.levelPreview]);
+    this.levelCache ??= new Map();
+    const hit = this.levelCache.get(g.room?.id);
+    if (hit?.key === key) return hit.la;
+    const la = analyzeLeveling(d, g, { analysis, preview: this.levelPreview ?? undefined });
+    this.levelCache.set(g.room?.id, { key, la });
+    return la;
+  }
+
+  /** The survey node under the mouse in any room of the active group: {geom, node} or null. */
+  levelNodeAt(raw, la) {
+    let best = null;
+    let bestD = Math.max(this.px(12), la.grid.spacing * 0.25);
+    for (const m of la.members) {
+      for (const nd of m.nodes) {
+        const dd = dist(nd, raw);
+        if (dd < bestD) {
+          best = { geom: m.geom, node: nd };
+          bestD = dd;
+        }
+      }
+    }
+    return best;
+  }
+
+  /** Current survey target: room geometry, analysis and the node being typed into. */
+  levelContext() {
+    const analysis = analyze(this.design);
+    const g = this.levelRoom(analysis);
+    if (!g) return null;
+    const la = this.levelAnalysis(g, analysis);
+    const entry = this.levelEntry?.roomId === g.room.id ? la.nodes.find((nd) => nd.key === this.levelEntry.key) : null;
+    return { g, la, node: entry ?? null };
+  }
+
+  /** Makes `node` of room `g` the entry target, selecting that room when it's a linked neighbour. */
+  startLevelEntry(g, node) {
+    this.levelEntry = node ? { roomId: g.room.id, key: node.key } : null;
+    this.typed = '';
+    this.message = '';
+    if (node && this.app.selection?.type === 'room' && this.app.selection.id !== g.room.id) this.app.select({ type: 'room', id: g.room.id });
+    this.render();
+  }
+
+  /**
+   * Rooms a survey walks through from `g`: g first, then rooms reachable
+   * through doors and openings with linking on (surveyed or not yet), nearest first.
+   */
+  surveyRooms(g, analysis) {
+    const linked = (x) => resolveLeveling(x.room, this.design.units).linked !== false;
+    const self = analysis.rooms.find((x) => x.room?.id === g.room.id) ?? g;
+    const order = [self];
+    if (!linked(self)) return order;
+    for (let k = 0; k < order.length; k++) {
+      for (const next of connectedRooms(this.design, order[k], analysis)) if (linked(next) && !order.includes(next)) order.push(next);
+    }
+    return order;
+  }
+
+  /**
+   * Steps through nodes in walking order. Past the last node, entry carries
+   * on in the nearest linked room that still has empty nodes, else ends with a summary.
+   */
+  stepLevelEntry(ctx, step) {
+    const { g, la, node } = ctx;
+    const i = la.nodes.indexOf(node) + step;
+    if (i < 0) return this.startLevelEntry(g, la.nodes[0]);
+    if (i >= la.nodes.length) {
+      const analysis = analyze(this.design);
+      const rooms = this.surveyRooms(g, analysis).slice(1).map((geom) => ({ geom, nodes: this.levelAnalysis(geom, analysis).nodes }));
+      const next = rooms.find((r) => r.nodes.some((nd) => nd.z == null));
+      if (next) {
+        this.app.toast(`${g.room.name} done: continuing in ${next.geom.room.name}`);
+        return this.startLevelEntry(next.geom, next.nodes.find((nd) => nd.z == null));
+      }
+      this.startLevelEntry(g, null);
+      const all = la.members.flatMap((m) => m.nodes);
+      const done = all.filter((nd) => nd.z != null).length;
+      const where = la.linked ? ` in ${la.members.length} linked rooms` : '';
+      this.app.toast(done === all.length ? `Survey complete: all ${done} nodes measured${where}` : `End of grid: ${done} of ${all.length} nodes measured${where}`);
+      return;
+    }
+    this.startLevelEntry(g, la.nodes[i]);
+  }
+
+  /** Arrow keys: the nearest node in that grid direction (skipping gaps in L-shaped rooms). */
+  moveLevelEntry(ctx, dc, dr) {
+    const { g, la, node } = ctx;
+    const ahead = la.nodes
+      .filter((nd) => (dc ? Math.sign(nd.col - node.col) === dc && nd.row === node.row : Math.sign(nd.row - node.row) === dr && nd.col === node.col))
+      .sort((p, q) => Math.abs(p.col - node.col) + Math.abs(p.row - node.row) - (Math.abs(q.col - node.col) + Math.abs(q.row - node.row)));
+    if (ahead[0]) this.startLevelEntry(g, ahead[0]);
+  }
+
+  commitReading(g, node, z) {
+    const roomId = g.room.id;
+    this.app.change(z == null ? `Clear reading ${node.label}` : `Reading ${node.label}`, (d) => {
+      const room = d.rooms.find((r) => r.id === roomId);
+      const lv = resolveLeveling(room, d.units);
+      room.leveling = { ...lv, readings: setReading(lv.readings, node, z, lv.spacing) };
+    });
+  }
+
+  /** The node a reading goes to: the active one, else the first empty node. */
+  entryTarget(ctx) {
+    return ctx.node ?? ctx.la.nodes.find((nd) => nd.z == null) ?? ctx.la.nodes[0] ?? null;
+  }
+
+  /** Saves z at the target node, then moves on (quick entry) or stays there. */
+  enterReading(ctx, z) {
+    const node = this.entryTarget(ctx);
+    if (!node) return;
+    this.levelEntry = { roomId: ctx.g.room.id, key: node.key };
+    this.typed = '';
+    this.message = '';
+    this.commitReading(ctx.g, node, z);
+    if (this.levelQuick) this.stepLevelEntry(this.levelContext() ?? { ...ctx, node }, 1);
+    else this.render();
+  }
+
+  /** Parses typed text and enters it; empty text skips ahead (quick entry) or stops. Returns true when saved. */
+  submitTyped(ctx, raw) {
+    const text = raw.trim();
+    if (!text) {
+      if (!ctx.node) return false;
+      if (this.levelQuick) this.stepLevelEntry(ctx, 1);
+      else this.startLevelEntry(ctx.g, null);
+      return false;
+    }
+    const unit = readingUnit(this.design);
+    const z = parseDeviation(text, unit);
+    if (z == null) {
+      this.flash(`Couldn't read "${text}": try ${unit === 'in' ? '+1/4, -3/8 or 5mm' : '+4, -6 or -1/8"'}`);
+      return false;
+    }
+    if (Math.abs(z) > MAX_READING) {
+      this.flash(`${formatDeviation(z, unit, { sign: true })} looks too large. Bare numbers are ${unit === 'in' ? 'inches' : 'mm'} (see panel)`);
+      return false;
+    }
+    this.enterReading(ctx, z);
+    return true;
+  }
+
+  /** Builds the entry bar for a reading unit: preset buttons, a custom value box and prev/next/clear. */
+  buildPalette(unit) {
+    const keepFocus = (e) => e.preventDefault(); // clicks must not pull focus off the plan
+    const withCtx = (fn) => () => {
+      const ctx = this.levelContext();
+      if (ctx?.la.nodes.length) fn(ctx);
+    };
+    const step = (dir) => withCtx((ctx) => (ctx.node ? this.stepLevelEntry(ctx, dir) : this.startLevelEntry(ctx.g, this.entryTarget(ctx))));
+    this.paletteLabel = h('span', { class: 'lvl-pal-node' });
+    this.paletteButtons = READING_PRESETS[unit].map((z) => ({
+      z,
+      el: h('button', {
+        class: `lvl-preset ${z > 0 ? 'hi' : z < 0 ? 'lo' : 'zero'}`, title: `Reading ${formatDeviation(z, unit, { sign: true })}`,
+        onmousedown: keepFocus, onclick: withCtx((ctx) => this.enterReading(ctx, z)),
+      }, formatDeviation(z, unit, { sign: true, compact: true }).replace(/"$/, '').replace('±', '')),
+    }));
+    const input = h('input', {
+      type: 'text', class: 'lvl-pal-input', spellcheck: false, autocomplete: 'off', 'aria-label': 'Other reading',
+      placeholder: unit === 'in' ? 'Other, e.g. 3/8' : 'Other, e.g. -7',
+    });
+    input.addEventListener('input', () => {
+      const ctx = this.levelContext();
+      const target = ctx && !ctx.node && this.entryTarget(ctx);
+      if (target) this.levelEntry = { roomId: ctx.g.room.id, key: target.key };
+      this.typed = input.value;
+      this.message = '';
+      this.render();
+    });
+    input.addEventListener('keydown', (e) => {
+      const ctx = this.levelContext();
+      if (!ctx) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (this.submitTyped(ctx, input.value) || !input.value.trim()) input.value = '';
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        step(e.shiftKey ? -1 : 1)();
+      } else if (e.key === 'Escape') {
+        input.value = '';
+        this.typed = '';
+        input.blur();
+        this.startLevelEntry(ctx.g, null);
+      } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && ctx.node) {
+        e.preventDefault();
+        this.moveLevelEntry(ctx, 0, e.key === 'ArrowDown' ? 1 : -1);
+      }
+    });
+    this.paletteInput = input;
+    this.palette.dataset.unit = unit;
+    this.palette.replaceChildren(
+      this.paletteLabel,
+      h('div', { class: 'lvl-pal-presets', role: 'group', 'aria-label': 'Preset readings' }, this.paletteButtons.map((b) => b.el)),
+      input,
+      h('div', { class: 'lvl-pal-nav' },
+        h('button', { class: 'icon', title: 'Previous node (Shift+Tab)', onmousedown: keepFocus, onclick: step(-1) }, '‹'),
+        h('button', { class: 'icon', title: 'Next node (Tab)', onmousedown: keepFocus, onclick: step(1) }, '›'),
+        h('button', {
+          class: 'icon', title: 'Clear this reading (Del)', onmousedown: keepFocus,
+          onclick: withCtx((ctx) => ctx.node?.z != null && this.commitReading(ctx.g, ctx.node, null)),
+        }, '⌫')),
+    );
+  }
+
+  /** Shows the entry bar for the surveyed room and syncs its node label, highlighted preset and typed text. */
+  updatePalette(level) {
+    const la = level?.la;
+    this.palette.hidden = !la?.nodes.length;
+    if (this.palette.hidden) return;
+    if (this.palette.dataset.unit !== level.unit) this.buildPalette(level.unit);
+    const nd = level.entryNode;
+    const next = nd ?? la.nodes.find((x) => x.z == null);
+    this.paletteLabel.replaceChildren(nd ? nd.label : next ? `Next ${next.label}` : 'Done', h('small', {}, level.unit === 'in' ? 'inches' : 'mm'));
+    for (const b of this.paletteButtons) b.el.classList.toggle('active', nd?.z != null && Math.abs(nd.z - b.z) < 0.01);
+    if (document.activeElement !== this.paletteInput) this.paletteInput.value = this.typed;
+  }
+
+  /** Keyboard handling for the Level tool; returns true when consumed. */
+  onLevelKey(e) {
+    const ctx = this.levelContext();
+    if (!ctx) return false;
+    const { g, la, node } = ctx;
+    const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
+    if (!node) {
+      // Typing a reading with nothing active starts at the first empty node.
+      if (plain && e.key.length === 1 && /[0-9.+\-−]/.test(e.key) && la.nodes.length) {
+        this.startLevelEntry(g, la.nodes.find((nd) => nd.z == null) ?? la.nodes[0]);
+        this.typed = e.key;
+        this.render();
+        return true;
+      }
+      return e.key === 'Delete' || e.key === 'Backspace'; // never delete the room from here
+    }
+    if (plain && e.key.length === 1 && READING_TYPABLE.test(e.key)) {
+      this.typed += e.key;
+      this.message = '';
+      this.render();
+      return true;
+    }
+    switch (e.key) {
+      case 'Enter':
+        this.submitTyped(ctx, this.typed);
+        return true;
+      case 'Tab':
+        this.stepLevelEntry(ctx, e.shiftKey ? -1 : 1);
+        return true;
+      case 'ArrowRight': this.moveLevelEntry(ctx, 1, 0); return true;
+      case 'ArrowLeft': this.moveLevelEntry(ctx, -1, 0); return true;
+      case 'ArrowDown': this.moveLevelEntry(ctx, 0, 1); return true;
+      case 'ArrowUp': this.moveLevelEntry(ctx, 0, -1); return true;
+      case 'Backspace':
+        if (this.typed) this.typed = this.typed.slice(0, -1);
+        this.render();
+        return true;
+      case 'Delete':
+        if (node.z != null) this.commitReading(g, node, null);
+        return true;
+      case 'Escape':
+        if (this.typed) {
+          this.typed = '';
+          this.render();
+        } else {
+          this.startLevelEntry(g, null);
+        }
+        return true;
+      default:
+        return false;
+    }
   }
 
   finishDrawing(commit = true) {
@@ -368,6 +688,21 @@ export class PlanView {
     }
     if (e.button !== 0) return;
 
+    if (this.tool === 'level') {
+      const ctx = this.levelContext();
+      const hit = ctx && this.levelNodeAt(raw, ctx.la);
+      if (hit) {
+        this.startLevelEntry(hit.geom, hit.node);
+        return;
+      }
+      const room = this.hitTest(raw);
+      this.levelEntry = null;
+      this.typed = '';
+      this.app.select(room?.type === 'room' ? room : this.app.selection);
+      this.render();
+      return;
+    }
+
     if (this.tool === 'wall') {
       const last = this.draw?.points.at(-1);
       const s = this.snap(raw, { from: last, free: e.shiftKey, extraPoints: this.draw?.points ?? [] });
@@ -502,6 +837,12 @@ export class PlanView {
     } else if (this.tool === 'pan') {
       this.hover = null;
       this.cursor = { p: raw };
+    } else if (this.tool === 'level') {
+      const ctx = this.levelContext();
+      this.hover = null;
+      const hit = ctx && this.levelNodeAt(raw, ctx.la);
+      this.levelHover = hit ? { roomId: hit.geom.room.id, key: hit.node.key } : null;
+      this.cursor = { p: raw };
     } else {
       const hit = this.hitTest(raw);
       if (JSON.stringify(hit) !== JSON.stringify(this.hover)) this.hover = hit;
@@ -585,6 +926,7 @@ export class PlanView {
 
   /** Keyboard input routed from the app; returns true when consumed. */
   onKey(e) {
+    if (this.tool === 'level' && this.onLevelKey(e)) return true;
     const drawing = (this.tool === 'wall' && this.draw) || (this.tool === 'rect' && this.draw);
     if (drawing && e.key.length === 1 && TYPABLE.test(e.key) && !e.ctrlKey && !e.metaKey) {
       this.typed += e.key;
@@ -659,16 +1001,47 @@ export class PlanView {
     this.worldLayer.setAttribute('transform', `matrix(${s} 0 0 ${s} ${tx} ${ty})`);
     this.gridLayer.innerHTML = this.renderGrid();
     const analysis = analyze(this.design);
+    const level = this.tool === 'level' ? this.renderLevel(analysis) : null;
     this.worldLayer.innerHTML = [
       this.renderRooms(analysis),
+      level?.heat,
       this.renderWalls(analysis),
       this.renderOpenings(analysis),
       this.renderDimensions(analysis),
-      this.renderRoomLabels(analysis),
+      level ? '' : this.renderRoomLabels(analysis),
+      level?.survey,
       this.renderSelection(analysis),
       this.renderPreview(),
     ].join('');
-    this.overlayLayer.innerHTML = this.renderOverlay();
+    this.overlayLayer.innerHTML = this.renderOverlay(level);
+    this.updatePalette(level);
+  }
+
+  /**
+   * Heatmaps for every surveyed room (one continuous map per linked group);
+   * grids, readings and call-outs for the active room's group.
+   */
+  renderLevel(analysis) {
+    const active = this.levelRoom(analysis);
+    const unit = readingUnit(this.design);
+    const drawn = new Set();
+    let heat = '';
+    let survey = '';
+    let activeLa = null;
+    for (const g of analysis.rooms) {
+      const isActive = g === active;
+      if (!g.room || (!isActive && !g.room.leveling?.readings?.length)) continue;
+      const la = this.levelAnalysis(g, analysis);
+      if (isActive) activeLa = la;
+      if (drawn.has(g.room.id)) continue;
+      la.group.ids.forEach((id) => drawn.add(id));
+      heat += renderHeatmap(this, la);
+    }
+    if (activeLa) {
+      survey = renderSurvey(this, activeLa, { unit, numbers: this.levelNumbers, entry: this.levelEntry, hover: this.levelHover });
+    }
+    const entryNode = activeLa && this.levelEntry?.roomId === active.room.id ? activeLa.nodes.find((nd) => nd.key === this.levelEntry.key) : null;
+    return { heat, survey, la: activeLa, entryNode, unit };
   }
 
   renderGrid() {
@@ -1014,8 +1387,23 @@ export class PlanView {
     return out.join('');
   }
 
-  renderOverlay() {
+  renderOverlay(level) {
     const out = [];
+    if (level?.la?.ready) out.push(renderLegend(level.la, level.unit));
+    if (level?.entryNode) {
+      // Reading entry box beside the active node; messages stack below it.
+      const nd = level.entryNode;
+      const s = this.toScreen(nd);
+      const current = nd.z != null ? formatDeviation(nd.z, level.unit, { sign: true }) : '';
+      const text = `${nd.label}  ${this.typed || current}▏`;
+      const w = Math.max(80, text.length * 7.4 + 20);
+      out.push(`<g class="typed" transform="translate(${n(s.x + 16)} ${n(s.y - 34)})"><rect width="${n(w)}" height="24" rx="4"/><text x="10" y="16">${esc(text)}</text></g>`);
+      if (this.message) {
+        const mw = Math.max(60, this.message.length * 6.6 + 20);
+        out.push(`<g class="message" transform="translate(${n(s.x + 16)} ${n(s.y - 6)})"><rect width="${n(mw)}" height="24" rx="4"/><text x="10" y="16">${esc(this.message)}</text></g>`);
+      }
+      return out.join('');
+    }
     const anchor = this.cursor?.p ?? this.draw?.points?.at(-1) ?? this.draw?.start;
     if ((this.typed || this.message) && anchor) {
       const s = this.toScreen(anchor);

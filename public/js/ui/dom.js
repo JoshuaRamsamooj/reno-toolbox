@@ -1,5 +1,5 @@
 // Minimal DOM builder and form controls shared by the side panels.
-import { formatLength, parseLength } from '../core/units.js';
+import { formatDeviation, formatLength, parseDeviation, parseLength } from '../core/units.js';
 
 /** h('div', {class: 'x', onclick}, child, 'text', [more]) */
 export function h(tagName, props = {}, ...children) {
@@ -54,6 +54,38 @@ export function lengthInput(value, units, onCommit, { placeholder, allowEmpty = 
     if (e.key === 'Enter') input.blur();
     if (e.key === 'Escape') {
       input.value = value == null ? '' : formatLength(value, units);
+      input.classList.remove('invalid');
+      input.blur();
+    }
+  });
+  return input;
+}
+
+/** Text input for a level deviation ("+4", "-6mm", "3/16\"") that commits millimetres. */
+export function deviationInput(value, unit, onCommit, { placeholder, allowEmpty = false, min = -Infinity, max = Infinity, sign = true } = {}) {
+  const show = (v) => (v == null ? '' : formatDeviation(v, unit, { sign }));
+  const input = h('input', { type: 'text', class: 'length-input', value: show(value), placeholder: placeholder ?? '', spellcheck: false, autocomplete: 'off' });
+  input.addEventListener('change', () => {
+    const raw = input.value.trim();
+    if (!raw && allowEmpty) {
+      input.classList.remove('invalid');
+      if (value != null) onCommit(null);
+      return;
+    }
+    const mm = parseDeviation(raw, unit);
+    if (mm == null || mm < min || mm > max) {
+      input.classList.add('invalid');
+      input.title = unit === 'in' ? 'Try +1/8, -3/16" or 4mm' : 'Try +4, -6.5 or 1/4"';
+      return;
+    }
+    input.classList.remove('invalid');
+    if (value == null || Math.abs(mm - value) > 0.01) onCommit(mm);
+    else input.value = show(value);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape') {
+      input.value = show(value);
       input.classList.remove('invalid');
       input.blur();
     }

@@ -3,8 +3,13 @@
 import { addBulkhead, analyze, deleteNode, roomElevations, deleteOpening, deleteRoom, deleteWall, indexDesign, OPENING_TYPES, resolveRoomCeiling, setWallLength, wallLength } from '../core/model.js';
 import { CEILING_TYPES } from '../core/ceiling.js';
 import { bulkheadDefaults } from '../core/bulkhead.js';
-import { formatArea, formatLength, formatLinear, unitDefaults } from '../core/units.js';
-import { checkbox, field, h, lengthInput, select } from './dom.js';
+import {
+  COMPOUNDS, DEEP_GRIND, FLATNESS_SPECS, SPACING_OPTIONS, bagCoverage, connectedRooms, readingUnit, resolveLeveling, roomDoorways,
+} from '../core/leveling.js';
+import { MM_PER_IN, formatArea, formatDeviation, formatLength, formatLinear, unitDefaults } from '../core/units.js';
+import { checkbox, deviationInput, field, h, lengthInput, numberInput, select } from './dom.js';
+
+const LITRES_PER_CU_FT = 28.3168;
 
 export class Inspector {
   constructor(app, el) {
@@ -16,7 +21,8 @@ export class Inspector {
     const { design, selection } = this.app;
     const analysis = analyze(design);
     let body;
-    if (selection?.type === 'room') body = this.roomPanel(analysis, selection.id);
+    if (this.app.plan.tool === 'level') body = this.levelPanel(analysis);
+    else if (selection?.type === 'room') body = this.roomPanel(analysis, selection.id);
     else if (selection?.type === 'wall') body = this.wallPanel(analysis, selection.id);
     else if (selection?.type === 'opening') body = this.openingPanel(analysis, selection.id);
     else if (selection?.type === 'node') body = this.nodePanel(selection.id);
@@ -281,6 +287,291 @@ export class Inspector {
     );
   }
 
+  /** Level tool: survey grid, target and clearance, then the cut/fill plan and compound estimate. */
+  levelPanel(analysis) {
+    const d = this.app.design;
+    const u = d.units;
+    const plan = this.app.plan;
+    const g = plan.levelRoom(analysis);
+    if (!g) {
+      return h('div', { class: 'panel' },
+        h('div', { class: 'panel-kicker' }, 'Floor leveling'),
+        h('p', {}, analysis.rooms.length ? 'Click a room on the plan to survey its floor.' : 'Draw a room first, then survey its floor here.'));
+    }
+    const roomId = g.room.id;
+    const la = plan.levelAnalysis(g, analysis);
+    const unit = readingUnit(d);
+    const dev = (v, sign = true) => formatDeviation(v, unit, { sign });
+    const area = (mm2) => formatArea(mm2, u);
+    // Edits this room's survey; pass la.group.ids for settings linked rooms share (target, tolerance).
+    const editLv = (label, fn, ids = [roomId]) => this.edit(label, (x) => {
+      for (const id of ids) {
+        const room = x.rooms.find((r) => r.id === id);
+        if (!room) continue;
+        const lv = resolveLeveling(room, x.units);
+        fn(lv);
+        room.leveling = lv;
+      }
+    });
+    const measured = la.nodes.filter((nd) => nd.z != null).length;
+    const zs = la.members.find((m) => m.geom.room.id === roomId).readings.map((r) => r.z);
+    const firstEmpty = la.nodes.find((nd) => nd.z == null) ?? la.nodes[0];
+
+    // Keys keep a decimal so integer-like ones (762) don't jump ahead in the option order.
+    const spacingKey = (mm) => mm.toFixed(1);
+    const spacingOptions = Object.fromEntries(SPACING_OPTIONS[u].map((mm) => [spacingKey(mm), formatLength(mm, u, { precision: 'label' })]));
+    spacingOptions[spacingKey(la.lv.spacing)] ??= formatLength(la.lv.spacing, u, { precision: 'label' });
+    const specKey = Object.entries(FLATNESS_SPECS).find(([, sp]) => Math.abs(sp.tolerance - la.band * 2) < 0.01)?.[0] ?? 'standard';
+
+    const survey = [
+      h('h3', {}, 'Survey grid'),
+      h('div', { class: 'field-row' },
+        field('Grid spacing', select(spacingKey(la.lv.spacing), spacingOptions, (v) => editLv('Grid spacing', (lv) => { lv.spacing = Number(v); }))),
+        field('Bare numbers are', select(unit, { mm: 'mm', in: 'inches' }, (v) => this.edit('Reading unit', (x) => { x.settings.readingUnit = v; })))),
+      checkbox('Quick entry: Enter jumps to the next node', plan.levelQuick, (v) => { plan.levelQuick = v; }),
+      checkbox('Show numbers on the plan', plan.levelNumbers, (v) => {
+        plan.levelNumbers = v;
+        plan.render();
+      }),
+      la.nodes.length ? h('div', { class: 'button-row' },
+        h('button', {
+          class: 'primary',
+          onclick: (e) => {
+            e.currentTarget.blur();
+            plan.startLevelEntry(g, firstEmpty);
+          },
+        }, measured ? `Continue at ${firstEmpty.label}` : `Start at ${firstEmpty.label}`),
+      ) : h('p', { class: 'error small' }, 'The room is too small for this grid spacing.'),
+      h('p', { class: 'muted small' },
+        'Readings are relative to your benchmark (+ high, − low). Tap a preset in the bar under the plan, or type any other value, e.g. ', h('code', {}, unit === 'in' ? '3/8' : '4'), ' or ', h('code', {}, unit === 'in' ? '-5/16' : '-7.5'),
+        ', then Enter. Tab skips, arrows move, Del clears, Esc stops. Nodes run in walking order: row 1 west → east, row 2 back.'),
+      la.offGrid.length ? h('p', { class: 'muted small' }, `${la.offGrid.length} reading${la.offGrid.length > 1 ? 's sit' : ' sits'} off this grid (shown as ◆, still used). `,
+        h('button', { class: 'link', onclick: () => editLv('Remove off-grid readings', (lv) => { lv.readings = lv.readings.filter((r) => !la.offGrid.some((o) => o.x === r.x && o.y === r.y)); }) }, 'Remove them')) : null,
+    ];
+
+    const target = [
+      h('h3', {}, 'Target & tolerance'),
+      field('Flatness spec', select(specKey, Object.fromEntries(Object.entries(FLATNESS_SPECS).map(([k, sp]) => [k, `${sp[u]} · ${sp.use}`])),
+        (v) => editLv('Flatness spec', (lv) => { lv.tolerance = FLATNESS_SPECS[v].tolerance; }, la.group.ids)),
+      `Level band ±${dev(la.band, false)} around the target keeps every straightedge gap within spec`),
+    ];
+    if (!la.ready) {
+      target.push(h('p', { class: 'lvl-callout' }, `Enter at least 3 readings to see the heatmap and the action plan (${measured} of ${la.nodes.length} so far).`));
+    } else {
+      target.push(...this.levelTargetFields(g, la, editLv, dev));
+    }
+
+    return h('div', { class: 'panel' },
+      h('div', { class: 'panel-kicker' }, 'Floor leveling'),
+      h('h2', {}, g.room.name),
+      h('div', { class: 'stats' },
+        stat('Readings', `${measured} / ${la.nodes.length}`),
+        stat('Highest', zs.length ? dev(Math.max(...zs)) : '–'),
+        stat('Lowest', zs.length ? dev(Math.min(...zs)) : '–'),
+      ),
+      ...survey,
+      ...this.levelLinkFields(g, la, analysis, editLv),
+      ...target,
+      ...this.levelLockFields(g, la, editLv, dev),
+      ...(la.ready ? this.levelActionPlan(la, dev, area) : []),
+      la.readings.length ? h('div', { class: 'button-row' },
+        h('button', { class: 'danger', onclick: () => confirm(`Clear all ${la.readings.length} readings in ${g.room.name}?`) && editLv('Clear readings', (lv) => { lv.readings = []; }) }, 'Clear readings'),
+      ) : null,
+    );
+  }
+
+  levelTargetFields(g, la, editLv, dev) {
+    const plan = this.app.plan;
+    const roomId = g.room.id;
+    const lo = Math.floor(Math.min(la.min - 2 * la.band, la.target, la.recommended));
+    const hi = Math.ceil(Math.max(la.max + la.band, la.target));
+    const readout = h('strong', { class: 'lvl-readout' }, dev(la.target));
+    const slider = h('input', { type: 'range', min: lo, max: hi, step: 0.5, value: la.target, 'aria-label': 'Target height' });
+    slider.addEventListener('input', () => {
+      plan.levelPreview = { roomId, target: Number(slider.value) };
+      readout.textContent = dev(Number(slider.value));
+      plan.render();
+    });
+    slider.addEventListener('change', () => {
+      plan.levelPreview = null;
+      editLv('Target height', (lv) => { lv.target = Number(slider.value); }, la.group.ids);
+      plan.render();
+    });
+    const unit = readingUnit(this.app.design);
+    const area = (mm2) => formatArea(mm2, this.app.design.units);
+    // Both optimised plans, already capped by the clearance locks; choosing one makes it the recommendation.
+    const option = (key, title) => {
+      const o = la.options[key];
+      const active = la.minimize === key;
+      return h('button', {
+        class: `lvl-option${active ? ' active' : ''}`, 'aria-pressed': String(active),
+        onclick: () => editLv(title, (lv) => { lv.minimize = key; lv.target = null; }, la.group.ids),
+      },
+      h('strong', {}, title),
+      h('span', {}, `Target ${dev(o.target)}${o.capped ? ' (lock)' : ''}`),
+      h('span', {}, o.grindArea ? `Grind ${area(o.grindArea)}, cut ≤ ${dev(o.maxCut, false)}` : 'No grinding'),
+      h('span', {}, o.bags ? `Pour ${area(o.fillArea)}, ${o.bags} bag${o.bags === 1 ? '' : 's'}` : 'No compound'));
+    };
+    const out = [
+      field('Optimize for', h('div', { class: 'lvl-options' }, option('grind', 'Minimize grinding'), option('pour', 'Minimize pour')),
+        la.locks.length ? 'Both plans stay within the clearance locks' : null),
+      field('Target height (vs benchmark)', h('div', { class: 'lvl-target' }, slider, readout)),
+      field('Exact target', deviationInput(la.auto ? null : la.target, unit, (mm) => editLv('Target height', (lv) => { lv.target = mm; }, la.group.ids),
+        { allowEmpty: true, placeholder: `Auto: ${dev(la.recommended)}` })),
+    ];
+    const capName = la.capLock ? lockName(la.capLock, la.linked).replace(/^./, (c) => c.toUpperCase()) : '';
+    const rec = la.strategy === 'none'
+      ? h('p', { class: `lvl-callout${la.auto ? ' ok' : ''}` }, `The floor is already within tolerance: at the recommended ${dev(la.recommended)} no pour or grinding is needed.`)
+      : la.strategy === 'grind-only'
+        ? h('p', { class: 'lvl-callout' },
+          la.options.pour.capped ? `${capName} limits the floor to ${dev(la.cap)}, below the lowest spot. ` : '',
+          `Recommended: grind the floor down to ${dev(la.recommended)} so no compound is needed`,
+          la.options.pour.grindArea ? ` (${la.zones.length && la.auto ? `${la.zones.length} spot${la.zones.length === 1 ? '' : 's'}, ` : ''}cuts up to ${dev(la.options.pour.maxCut, false)}).` : '.')
+      : la.strategy === 'fill'
+        ? h('p', { class: 'lvl-callout' }, `Recommended: pour to ${dev(la.recommended)}, filling only (no grinding).`)
+        : h('p', { class: 'lvl-callout warn' }, `${capName} limits the floor to ${dev(la.cap)}, below the ${dev(la.fillOnly)} a fill-only pour needs. `,
+          h('b', {}, `Recommended: target ${dev(la.recommended)} and grind the high spots`), ' below rather than raising the whole floor.');
+    out.push(rec);
+    for (const b of la.breaches) {
+      out.push(h('p', { class: 'lvl-callout danger' },
+        h('b', {}, `Target breaches ${lockName(b, la.linked)} by ${dev(b.by, false)}. `),
+        b.kind === 'doorway' ? `The floor would rise ${dev(la.target - b.z, false)} there (max ${dev(b.lock.maxBuild, false)}). ` : `The limit is ${dev(b.lock.maxBuild)} above the benchmark. `,
+        'Lower the target, or use the recommendation to shift work to grinding.'));
+    }
+    if (!la.auto) {
+      out.push(h('button', { class: 'link', onclick: () => editLv('Recommended target', (lv) => { lv.target = null; }, la.group.ids) }, `Use recommended (${dev(la.recommended)})`));
+    }
+    return out;
+  }
+
+  /** Locks of every room in the group (each edited on the room it belongs to); new ones go on this room. */
+  levelLockFields(g, la, editLv, dev) {
+    const unit = readingUnit(this.app.design);
+    const locationOptions = (geom) => {
+      const options = { '': 'Anywhere in the room (above benchmark)' };
+      for (const dw of roomDoorways(geom)) {
+        const label = `${OPENING_TYPES[dw.opening.type]} – ${dw.compass.toLowerCase()} wall`;
+        const same = Object.values(options).filter((v) => v.startsWith(label)).length;
+        options[dw.opening.id] = same ? `${label} (${same + 1})` : label;
+      }
+      return options;
+    };
+    const doorways = roomDoorways(g);
+    const cards = la.locks.map((l, i) => {
+      const lock = l.lock;
+      const owner = la.members.find((m) => m.geom.room.id === l.room.id)?.geom ?? g;
+      const editLock = (label, fn) => editLv(label, (lv) => fn(lv.locks.find((x) => x.id === lock.id)), [l.room.id]);
+      const opts = locationOptions(owner);
+      if (lock.openingId && !opts[lock.openingId]) opts[lock.openingId] = 'Removed opening';
+      const status = l.kind === 'missing' ? 'That opening no longer exists, so this lock is ignored.'
+        : l.kind === 'room' ? `Finished floor may reach ${dev(lock.maxBuild)} above the benchmark.`
+          : l.z == null ? 'Needs readings to locate the existing floor height here.'
+            : `Existing floor here reads ${dev(l.z)}, so the finished floor may reach ${dev(l.maxTarget)}.`;
+      const breached = la.breaches?.some((b) => b.lock.id === lock.id);
+      return h('div', { class: `subcard${breached ? ' breach' : ''}` },
+        h('div', { class: 'subcard-head' },
+          h('strong', {}, `Clearance lock ${i + 1}`, la.linked ? h('span', { class: 'muted' }, ` · ${l.room.name}`) : null),
+          h('button', { class: 'link danger', onclick: () => editLv('Remove clearance lock', (lv) => { lv.locks = lv.locks.filter((x) => x.id !== lock.id); }, [l.room.id]) }, 'Remove')),
+        field('Location', select(lock.openingId ?? '', opts, (v) => editLock('Lock location', (x) => { x.openingId = v || null; }))),
+        field('Max build-up', deviationInput(lock.maxBuild, unit, (mm) => editLock('Max build-up', (x) => { x.maxBuild = mm; }), { min: 0, sign: false })),
+        h('p', { class: `small ${breached ? 'error' : 'muted'}` }, status),
+      );
+    });
+    const firstDoor = doorways.find((dw) => dw.opening.type === 'door') ?? doorways[0];
+    return [
+      h('h3', {}, 'Clearance locks'),
+      ...cards,
+      cards.length ? null : h('p', { class: 'muted small' }, 'Cap how far the floor may rise, e.g. 8 mm at a patio door threshold or under a door that can\'t be trimmed.'),
+      h('button', {
+        class: 'add-button',
+        onclick: () => editLv('Add clearance lock', (lv) => {
+          lv.locks = [...lv.locks, { id: `lk${Date.now().toString(36)}${lv.locks.length}`, openingId: firstDoor?.opening.id ?? null, maxBuild: 8 }];
+        }),
+      }, la.linked ? `+ Add clearance lock in ${g.room.name}` : '+ Add clearance lock'),
+    ];
+  }
+
+  /** "Level with connected rooms" toggle, shown when the room shares a door or opening with another room. */
+  levelLinkFields(g, la, analysis, editLv) {
+    const d = this.app.design;
+    const neighbours = connectedRooms(d, g, analysis);
+    if (!neighbours.length) return [];
+    const on = la.lv.linked !== false;
+    const others = la.members.filter((m) => m.geom.room.id !== g.room.id).map((m) => m.geom.room.name);
+    const waiting = neighbours.filter((n) => !la.group.ids.includes(n.room.id)).map((n) => n.room.name);
+    let note;
+    if (!on) note = 'This room is leveled on its own, with its own target and heatmap.';
+    else if (others.length) {
+      note = `Leveled with ${others.join(', ')} as one floor: one continuous heatmap, shared target, tolerance and clearance locks. ` +
+        'All readings must be taken from the same benchmark.';
+    } else note = `Connected to ${neighbours.map((n) => n.room.name).join(', ')}. Rooms join once both have readings and linking on.`;
+    if (on && others.length && waiting.length) note += ` ${waiting.join(', ')} will join once surveyed (with linking on).`;
+    return [
+      h('h3', {}, 'Connected rooms'),
+      checkbox('Level with rooms connected by doors or openings', on, (v) => editLv(v ? 'Link rooms' : 'Unlink room', (lv) => { lv.linked = v; })),
+      h('p', { class: 'muted small' }, note),
+    ];
+  }
+
+  levelActionPlan(la, dev, area) {
+    const d = this.app.design;
+    const u = d.units;
+    const p = la.product;
+    const editEstimate = (label, fn) => this.edit(label, (x) => {
+      x.estimate = { ...(x.estimate ?? {}) };
+      fn(x.estimate);
+    });
+    const zones = la.zones.map((z) => {
+      const shown = z.nodes.slice(0, 5).map((nd) => `${nd.name} (${dev(nd.cut)})`).join(', ');
+      const more = z.nodes.length > 5 ? ` +${z.nodes.length - 5} more` : '';
+      return h('li', {},
+        h('div', {}, h('strong', {}, z.label), ' ', shown + more),
+        h('div', { class: 'muted small' },
+          `${area(z.area)} · cut up to ${dev(z.maxCut, false)} · centre ${formatLength(z.fromWest, u, { precision: 'label' })} from ${la.linked ? `${z.room}'s ` : ''}west wall, ${formatLength(z.fromNorth, u, { precision: 'label' })} from north wall`));
+    });
+
+    const isMetric = u === 'metric';
+    const volume = isMetric ? `${p.bagLitres.toFixed(1)} L` : `${(p.bagLitres / LITRES_PER_CU_FT).toFixed(2)} cu ft`;
+    const samples = isMetric ? [3, 6, 12] : [1 / 8, 1 / 4, 1 / 2].map((i) => i * MM_PER_IN);
+    const curve = samples.map((t) => `${area(bagCoverage(p, t))} at ${formatDeviation(t, isMetric ? 'mm' : 'in')}`).join(', ');
+    const range = `${p.minThickness > 0 ? formatDeviation(p.minThickness, isMetric ? 'mm' : 'in') : 'featheredge'} to ${formatDeviation(p.maxNeat, isMetric ? 'mm' : 'in')} neat` +
+      (p.extendedYield > 1 ? `, ${formatDeviation(p.maxExtended, isMetric ? 'mm' : 'in')} extended with aggregate (${p.extendedYield}× yield)` : '');
+    const custom = la.productKey === 'custom' ? h('div', { class: 'field-row' },
+      field(`Bag yield (${isMetric ? 'L' : 'cu ft'})`, numberInput(isMetric ? p.bagLitres : Math.round((p.bagLitres / LITRES_PER_CU_FT) * 100) / 100, (v) => editEstimate('Compound yield', (e) => {
+        e.levelCustom = { ...(e.levelCustom ?? {}), bagLitres: Math.max(0.1, isMetric ? v : v * LITRES_PER_CU_FT) };
+      }), { min: 0.1, step: isMetric ? 0.5 : 0.05 })),
+      field('Max thickness', deviationInput(p.maxNeat, readingUnit(d), (mm) => editEstimate('Compound max thickness', (e) => {
+        e.levelCustom = { ...(e.levelCustom ?? {}), maxNeat: mm, maxExtended: mm };
+      }), { min: 1, sign: false })),
+    ) : null;
+
+    const warnings = [];
+    if (la.overMaxArea > 0) warnings.push(`${area(la.overMaxArea)} is deeper than this product's ${dev(p.maxExtended, false)} limit: build those spots up first or pour in lifts.`);
+    else if (la.extendedArea > 0) warnings.push(`${area(la.extendedArea)} is deeper than ${dev(p.maxNeat, false)}: extend with aggregate there (counted at ${p.extendedYield}× yield).`);
+    if (la.maxCut > DEEP_GRIND) warnings.push(`Cuts deeper than ${dev(DEEP_GRIND, false)} are slow to grind in concrete; on wood subfloors plane or sister the joists instead.`);
+    if (la.missing) warnings.push(`${la.missing} grid node${la.missing > 1 ? 's have' : ' has'} no reading yet; the heatmap interpolates there.`);
+
+    return [
+      h('h3', {}, la.linked ? `Action plan · ${la.group.names.join(' + ')}` : 'Action plan'),
+      h('table', { class: 'lvl-table' }, h('tbody', {},
+        h('tr', {}, h('th', {}, h('span', { class: 'swatch grind' }), 'Total grind area'), h('td', {}, area(la.grindArea)), h('td', { class: 'muted' }, la.grindArea ? `max cut ${dev(la.maxCut, false)}` : '')),
+        h('tr', {}, h('th', {}, h('span', { class: 'swatch fill' }), 'Total fill area'), h('td', {}, area(la.fillArea)), h('td', { class: 'muted' }, la.fillArea ? `avg fill ${dev(la.avgFill, false)}` : '')),
+      )),
+      la.zones.length ? h('div', { class: 'field-label' }, `Grind these spots (${la.zones.length}, marked on the plan)`) : h('p', { class: 'muted small' }, 'No grinding needed at this target.'),
+      la.zones.length ? h('ol', { class: 'lvl-zones' }, zones) : null,
+      h('h3', {}, 'Compound estimate'),
+      field('Product', select(la.productKey, Object.fromEntries(Object.entries(COMPOUNDS).map(([k, c]) => [k, k === 'custom' ? 'Custom product…' : `${c.name} (${c.bag})`])),
+        (v) => editEstimate('Leveling compound', (e) => { e.levelProduct = v; }))),
+      custom,
+      h('p', { class: 'muted small' }, `Yield ${volume} per bag: about ${curve}. Pours from ${range}. Nominal data-sheet figures; check the bag.`),
+      field('Contingency', numberInput(la.contingency, (v) => editEstimate('Contingency', (e) => { e.levelContingency = Math.min(100, Math.max(0, v)); }), { min: 0, max: 100, suffix: '%' })),
+      h('p', { class: 'lvl-result' }, la.bags
+        ? ['You need ', h('b', {}, `${la.bags} bag${la.bags === 1 ? '' : 's'}`), ` of compound (includes ${la.contingency}% contingency).`]
+        : 'No compound needed at this target.'),
+      ...warnings.map((w) => h('p', { class: 'lvl-callout warn small' }, w)),
+    ];
+  }
+
   nodePanel(nodeId) {
     const d = this.app.design;
     const count = d.walls.filter((w) => w.a === nodeId || w.b === nodeId).length;
@@ -292,6 +583,13 @@ export class Inspector {
       ),
     );
   }
+}
+
+function lockName(l, linked = false) {
+  const where = linked ? ` of ${l.room.name}` : '';
+  if (l.kind === 'room') return linked ? `the room-wide clearance limit in ${l.room.name}` : 'the room-wide clearance limit';
+  if (l.kind === 'doorway') return `the ${OPENING_TYPES[l.doorway.opening.type].toLowerCase()} on the ${l.doorway.compass.toLowerCase()} wall${where}`;
+  return 'a removed opening';
 }
 
 function stat(label, value) {

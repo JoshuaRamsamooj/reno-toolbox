@@ -5,7 +5,11 @@ import { analyze, roomElevations, indexDesign, wallLength } from './model.js';
 import { profileArea, profileHeightAt } from './ceiling.js';
 import { lerp } from './geometry.js';
 import { bandArea, bulkheadSurfaces } from './bulkhead.js';
+import { analyzeLeveling, resolveCompound } from './leveling.js';
 import { MM2_PER_FT2, MM2_PER_M2, MM_PER_FT, areaValue, areaUnit, lengthValue } from './units.js';
+
+/** Material units counted in whole pieces. */
+export const COUNT_UNITS = new Set(['sheets', 'bags']);
 
 export function estimateDefaults(units) {
   return {
@@ -135,14 +139,49 @@ export function computeTakeoff(d) {
       measureFace(q, L, profile, ops, []);
       measureFace(q, L, profile, ops, []);
     }
-    return { id: g.room?.id ?? null, name: g.room?.name ?? 'Unnamed room', flooring: g.room?.flooring !== false, ceilingType: elev.spec.type, q };
+    // Linked rooms share one analysis; each room takes its own share of it.
+    const lv = g.room?.leveling?.readings?.length ? analyzeLeveling(d, g, { analysis }) : null;
+    const leveling = lv?.ready ? lv.byRoom.get(g.room.id) ?? null : null;
+    return { id: g.room?.id ?? null, name: g.room?.name ?? 'Unnamed room', flooring: g.room?.flooring !== false, ceilingType: elev.spec.type, q, leveling };
   });
 
   const totals = emptyQuantities();
   for (const r of rooms) for (const k of Object.keys(totals)) totals[k] += r.q[k];
   const flooredArea = rooms.filter((r) => r.flooring).reduce((s, r) => s + r.q.floorArea, 0);
 
-  return { rooms, totals, materials: materialList(d, totals, flooredArea), counts: countOpenings(d) };
+  return { rooms, totals, materials: [...materialList(d, totals, flooredArea), ...levelingMaterials(d, rooms)], counts: countOpenings(d) };
+}
+
+/** Self-leveler bags (contingency applied to the plan total) and grinding, from rooms with a floor survey. */
+function levelingMaterials(d, rooms) {
+  const surveyed = rooms.filter((r) => r.leveling);
+  if (!surveyed.length) return [];
+  const u = d.units;
+  const aUnit = areaUnit(u);
+  const A = (mm2) => areaValue(mm2, u);
+  const { product, contingency } = resolveCompound(d);
+  const raw = surveyed.reduce((s, r) => s + r.leveling.rawBags, 0);
+  const fillArea = surveyed.reduce((s, r) => s + r.leveling.fillArea, 0);
+  const grinding = surveyed.filter((r) => r.leveling.grindArea > 0);
+  const items = [];
+  if (raw > 0) {
+    const pouring = surveyed.filter((r) => r.leveling.rawBags > 0).map((r) => r.name).join(', ');
+    items.push({
+      key: 'self-leveler', category: 'Leveling', label: `Self-leveling compound – ${product.name} (${product.bag})`,
+      quantity: Math.ceil(raw * (1 + contingency / 100) - 1e-9), unit: 'bags',
+      detail: `${A(fillArea).toFixed(1)} ${aUnit} pour in ${pouring} + ${contingency}% contingency`,
+    });
+  }
+  if (grinding.length) {
+    const area = grinding.reduce((s, r) => s + r.leveling.grindArea, 0);
+    const spots = grinding.reduce((s, r) => s + r.leveling.zones, 0);
+    items.push({
+      key: 'grinding', category: 'Leveling', label: 'Grind high spots',
+      quantity: A(area), unit: aUnit,
+      detail: `${spots} spot${spots === 1 ? '' : 's'} in ${grinding.map((r) => r.name).join(', ')} (see Level tool for locations)`,
+    });
+  }
+  return items;
 }
 
 function countOpenings(d) {
@@ -245,7 +284,7 @@ export function takeoffToCsv(d, takeoff) {
   rows.push(line('TOTAL', '', takeoff.totals));
   rows.push([]);
   rows.push(['Material', 'Quantity', 'Unit', 'Notes']);
-  for (const m of takeoff.materials) rows.push([m.label, m.quantity.toFixed(m.unit === 'sheets' ? 0 : 2), m.unit, m.detail]);
+  for (const m of takeoff.materials) rows.push([m.label, m.quantity.toFixed(COUNT_UNITS.has(m.unit) ? 0 : 2), m.unit, m.detail]);
   return rows.map((r) => r.map(esc).join(',')).join('\n');
 }
 
