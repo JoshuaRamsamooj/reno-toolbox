@@ -91,7 +91,6 @@ button.link:hover { text-decoration: underline; background: none; }
   color: #4b5563;
 }
 .tool.active { background: var(--accent-soft); color: var(--accent); border-color: #c7d6fb; }
-.zoom { display: flex; flex-direction: column; gap: 4px; align-items: center; }
 
 .workspace { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .tabs { display: flex; gap: 2px; padding: 6px 10px 0; background: var(--bg); border-bottom: 1px solid var(--border); }
@@ -122,14 +121,13 @@ button.link:hover { text-decoration: underline; background: none; }
 #coords { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* Plan canvas ------------------------------------------------------------ */
-#plan { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; cursor: default; }
+#view-plan { display: flex; flex-direction: column; }
+#plan { flex: 1; width: 100%; min-height: 0; display: block; touch-action: none; user-select: none; cursor: default; }
 #plan[data-tool="wall"], #plan[data-tool="rect"] { cursor: crosshair; }
 #plan[data-tool="door"], #plan[data-tool="window"], #plan[data-tool="opening"] { cursor: copy; }
 #plan[data-tool="pan"] { cursor: grab; }
 #plan[data-tool="level"] { cursor: pointer; }
 #plan.panning { cursor: grabbing; }
-.grid-minor { stroke: #eceef2; stroke-width: 1; }
-.grid-major { stroke: #dcdfe5; stroke-width: 1; }
 .room { fill: var(--room); stroke: none; }
 .room.hover { fill: var(--room-hover); }
 .room.selected { fill: var(--room-selected); }
@@ -180,7 +178,7 @@ button.link:hover { text-decoration: underline; background: none; }
 .compass {
   position: absolute;
   right: 14px;
-  top: 12px;
+  top: 88px; /* below the canvas bar and top ruler */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -331,6 +329,7 @@ svg.elevation { width: 100%; height: auto; display: block; font-size: 11px; }
 .el-bulkhead { fill: url(#bh-hatch); stroke: #b45309; stroke-width: 1.2; }
 .el-bh-label { fill: #92400e; font-size: 10.5px; font-weight: 600; paint-order: stroke; stroke: #fff; stroke-width: 3px; }
 .el-peak { stroke: #9ca3af; stroke-dasharray: 3 3; }
+.el-tray, .fe-tray { fill: #f7f8fa; stroke: #4b5563; stroke-width: 1.2; stroke-dasharray: 6 4; }
 .el-op-label { fill: #374151; font-size: 10.5px; font-weight: 600; }
 .el-dim line { stroke: #6b7280; stroke-width: 1; }
 .el-dim-text { fill: #374151; font-size: 11px; font-variant-numeric: tabular-nums; paint-order: stroke; stroke: #fff; stroke-width: 3px; }
@@ -398,3 +397,117 @@ body:has(.lvl-palette:not([hidden])) .toast { bottom: 96px; } /* clear the Level
   .elev-grid { grid-template-columns: 1fr 1fr; }
   .elev-card { break-inside: avoid; }
 }
+
+/* Trim ----------------------------------------------------------------- */
+:root {
+  --tc-baseboard: #b7791f;
+  --tc-crown: #6d4c9f;
+  --tc-chair: #2f7d6d;
+  --tc-panel: #a23f5c;
+  --tc-casing: #2563eb;
+  --tc-wainscot: #c9b48a;
+}
+#plan[data-tool="trim"] { cursor: pointer; }
+.face-line.hover { stroke: var(--accent); stroke-linecap: butt; }
+.plan-trim.baseboard { fill: var(--tc-baseboard); stroke: #7c5214; }
+.plan-trim.crown { fill: var(--tc-crown); fill-opacity: 0.14; stroke: var(--tc-crown); }
+.plan-trim.casing { fill: var(--tc-casing); stroke: #1e40af; }
+.plan-trim.stool { fill: #bfd3fb; stroke: #1e40af; }
+.face-label { fill: var(--accent); font-weight: 600; paint-order: stroke; stroke: #fff; stroke-width: 3px; }
+
+.face-editor { display: flex; flex-direction: column; }
+.fe-header { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; background: #fff; border-bottom: 1px solid var(--border); }
+.fe-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fe-row .spacer { flex: 1; }
+.fe-face { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.face-select { max-width: 340px; }
+.fe-tools { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.fe-tool { border: none; border-radius: 0; border-right: 1px solid var(--border); padding: 5px 10px; font-size: 13px; }
+.fe-tool:last-child { border-right: none; }
+.fe-tool.active { background: var(--accent); color: #fff; }
+.chip.ext { background: #e5edff; color: #1e3a8a; }
+.chip.small { font-size: 11px; padding: 1px 7px; }
+.fe-canvas { flex: 1; width: 100%; min-height: 0; display: block; touch-action: none; user-select: none; font-size: 11px; cursor: crosshair; }
+.fe-empty { padding: 24px; overflow: auto; }
+.face-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+.face-group { display: flex; flex-direction: column; gap: 4px; }
+.face-group h3 { margin: 0 0 4px; font-size: 13px; }
+.face-pick { text-align: left; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+.fe-wall { fill: #fff; stroke: #374151; stroke-width: 1.6; }
+.fe-wall.exterior { fill: #f5f3ee; }
+.fe-floor { stroke: #111827; stroke-width: 2.5; }
+.fe-bulkhead { fill: url(#fe-bh-hatch); stroke: #b45309; stroke-width: 1.2; }
+.fe-opening { fill: #f9fafb; stroke: #374151; stroke-width: 1.3; }
+.fe-opening.window { fill: #e3efff; }
+.fe-opening.opening { stroke-dasharray: 5 3; }
+.fe-opening.hover { stroke: var(--accent); stroke-width: 2.5; fill: #dbe6fb; }
+.fe-sash { stroke: #6b8fc7; stroke-width: 1; }
+.fe-swing { fill: none; stroke: #9ca3af; stroke-dasharray: 4 3; }
+.fe-op-label { fill: #4b5563; font-size: 10.5px; font-weight: 600; }
+.fe-trim { stroke-width: 1; fill-opacity: 0.85; cursor: pointer; }
+.fe-trim.tc-baseboard, .el-trim.tc-baseboard { fill: var(--tc-baseboard); stroke: #7c5214; }
+.fe-trim.tc-crown, .el-trim.tc-crown { fill: var(--tc-crown); stroke: #4c3473; }
+.fe-trim.tc-chair-rail, .el-trim.tc-chair-rail { fill: var(--tc-chair); stroke: #1d5247; }
+.fe-trim.tc-panel-moulding, .el-trim.tc-panel-moulding { fill: var(--tc-panel); stroke: #6f2b3f; }
+.fe-trim.tc-door-casing, .fe-trim.tc-window-casing, .el-trim.tc-door-casing, .el-trim.tc-window-casing { fill: var(--tc-casing); stroke: #1e40af; }
+.fe-trim.tc-wainscot, .el-trim.tc-wainscot { fill: #efe6d4; stroke: #a8925f; fill-opacity: 1; }
+.el-trim { stroke-width: 0.6; fill-opacity: 0.8; }
+/* Wainscot by profile pattern: base colour, then seams, grooves, boards or battens on top. */
+.tc-wainscot.pat-beadboard { fill: #f1e8d4; }
+.tc-wainscot.pat-shiplap { fill: #f5f2ea; }
+.tc-wainscot.pat-board-batten { fill: #eef0e8; }
+.tc-wainscot.pat-panel { fill: #f3ead9; }
+.fe-wmarks { pointer-events: none; }
+.fe-wline { fill: none; stroke: #b9a77e; stroke-width: 1; }
+.fe-wline.board { stroke: #a39a86; stroke-width: 1.4; }
+.fe-wline.seam { stroke: #8a7650; stroke-width: 1.6; stroke-dasharray: 7 3; }
+.fe-wstrip { fill: #d9dccd; stroke: #8f9680; stroke-width: 1; }
+.fe-trim.hover { stroke: var(--accent); stroke-width: 2; }
+.fe-trim.selected { stroke: var(--accent); stroke-width: 2.5; fill-opacity: 1; }
+.fe-trim.seg { stroke: #f59e0b; stroke-width: 3; }
+.fe-cut { fill: none; stroke: #dc2626; stroke-width: 1.2; stroke-dasharray: 4 3; }
+.fe-handle { fill: #fff; stroke: var(--accent); stroke-width: 1.6; cursor: grab; }
+.fe-handle.hover { fill: var(--accent); }
+.fe-ghost { fill: var(--accent); fill-opacity: 0.18; stroke: var(--accent); stroke-dasharray: 4 3; stroke-width: 1; pointer-events: none; }
+.fe-ghost.box { fill-opacity: 0.08; stroke-width: 1.5; }
+.fe-snap { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.fe-label { fill: #1f2933; font-size: 10.5px; font-weight: 600; pointer-events: none; }
+.fe-readout { fill: var(--accent); font-size: 12px; font-weight: 700; pointer-events: none; }
+.fe-dim line { stroke: #6b7280; stroke-width: 1; }
+.fe-dim.sel line { stroke: var(--accent); }
+.fe-dim-text { fill: #374151; font-size: 11px; font-variant-numeric: tabular-nums; }
+.fe-dim.sel .fe-dim-text, .fe-dim-text.sel { fill: var(--accent); font-weight: 600; }
+.halo { paint-order: stroke; stroke: #fff; stroke-width: 3px; stroke-linejoin: round; }
+
+.trim-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-variant-numeric: tabular-nums; }
+.trim-list li { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.trim-list li.active { background: #fff7e6; border-radius: 4px; }
+.trim-list .qty { margin-left: auto; font-weight: 600; }
+.quick-apply { display: flex; flex-wrap: wrap; gap: 6px; }
+.quick-apply button { font-size: 12px; padding: 4px 8px; }
+.quick-remove { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.part-row { display: flex; flex-direction: column; gap: 6px; }
+.pkg-item { border-top: 1px solid var(--border); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+.pkg-apply { display: flex; flex-direction: column; gap: 4px; }
+details.packages summary { cursor: pointer; color: var(--accent); margin: 6px 0; }
+table.data.compact td { padding: 4px 6px; font-size: 12px; }
+.elev-actions { display: flex; align-items: center; gap: 8px; }
+
+/* Drawing canvas (plan and wall face) ------------------------------------- */
+.draw-canvas { background: var(--canvas); font-size: 11px; }
+.draw-canvas.panning { cursor: grabbing !important; }
+.cv-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #fff; border-bottom: 1px solid var(--border); }
+.cv-bar .spacer { flex: 1; }
+.cv-title { font-weight: 600; }
+.cv-controls { display: flex; align-items: center; gap: 8px; }
+.cv-grid-minor { stroke: #eceef2; stroke-width: 1; }
+.cv-grid-major { stroke: #d9dde5; stroke-width: 1; }
+.cv-guide { stroke: #f59e0b; stroke-width: 1; stroke-dasharray: 5 4; pointer-events: none; }
+.cv-guide-text { fill: #b45309; font-size: 11px; font-weight: 600; }
+.cv-ruler { fill: #f8f9fb; stroke: #d5d9e0; }
+.cv-ruler.corner { fill: #eef1f5; }
+.cv-ruler-ticks { stroke: #9aa3af; stroke-width: 1; }
+.cv-ruler-mark { stroke: #111827; stroke-width: 2; }
+.cv-ruler-cursor { stroke: #dc2626; stroke-width: 1.5; }
+.cv-ruler-text { fill: #4b5563; font-size: 9.5px; font-variant-numeric: tabular-nums; }

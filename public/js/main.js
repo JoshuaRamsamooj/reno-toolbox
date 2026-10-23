@@ -8,6 +8,8 @@ import { PlanView, TOOLS } from './ui/planView.js';
 import { Inspector } from './ui/inspector.js';
 import { ElevationView } from './ui/elevationView.js';
 import { TakeoffView } from './ui/takeoffView.js';
+import { FaceEditor } from './ui/faceEditor.js';
+import { setCatalog } from './core/trimCatalog.js';
 import { h } from './ui/dom.js';
 
 const DRAFT_KEY = 'reno-toolbox:draft';
@@ -26,11 +28,14 @@ class App {
     this.redoStack = [];
     this.tab = 'plan';
     this.spaceDown = false;
+    this.trimFace = null; // wall face open in the Trim tab: { wallId, dir }
+    this.lastPackageId = null;
 
     this.plan = new PlanView(this, $('#plan'));
     this.inspector = new Inspector(this, $('#inspector'));
     this.elevations = new ElevationView(this, $('#view-elevations'));
     this.takeoff = new TakeoffView(this, $('#view-takeoff'));
+    this.faceEditor = new FaceEditor(this, $('#view-trim'));
 
     this.on('change', () => this.refresh());
     this.on('selection', () => this.refresh());
@@ -107,6 +112,7 @@ class App {
 
   live() {
     this.plan.render();
+    if (this.tab === 'trim') this.faceEditor.renderCanvas();
   }
 
   endLive(label) {
@@ -219,6 +225,7 @@ class App {
     this.inspector.render();
     if (this.tab === 'elevations') this.elevations.render();
     if (this.tab === 'takeoff') this.takeoff.render();
+    if (this.tab === 'trim') this.faceEditor.render();
     $('#btn-undo').disabled = !this.undoStack.length;
     $('#btn-redo').disabled = !this.redoStack.length;
   }
@@ -228,8 +235,16 @@ class App {
     for (const b of document.querySelectorAll('.tabs button')) b.classList.toggle('active', b.dataset.tab === tab);
     for (const v of document.querySelectorAll('.view')) v.hidden = v.id !== `view-${tab}`;
     $('.toolbar').classList.toggle('disabled', tab !== 'plan');
+    if (tab === 'plan') this.updateToolbar(this.plan.tool);
     this.refresh();
     if (tab === 'plan') this.plan.render();
+  }
+
+  /** Opens a wall face ({wallId, dir}) in the Trim tab's elevation editor. */
+  openFace(ref) {
+    if (JSON.stringify(ref) !== JSON.stringify(this.trimFace)) this.faceEditor.sel = null;
+    this.trimFace = ref;
+    this.showTab('trim');
   }
 
   buildToolbar() {
@@ -242,6 +257,7 @@ class App {
       window: '<rect x="3" y="9" width="18" height="6" fill="none" stroke-width="2"/><path d="M3 12h18" stroke-width="1.5"/>',
       opening: '<path d="M3 12h5M16 12h5M8 8v8M16 8v8" stroke-width="2.5" fill="none"/>',
       level: '<rect x="2" y="8" width="20" height="8" rx="2" fill="none" stroke-width="2"/><rect x="9.5" y="10" width="5" height="4" rx="1" stroke="none"/><path d="M7 8v3M17 8v3" stroke-width="1.5"/>',
+      trim: '<path d="M3 4h18M3 20h18" stroke-width="2.5" fill="none"/><path d="M3 4v16" stroke-width="2" fill="none"/><rect x="8" y="8" width="9" height="8" fill="none" stroke-width="1.8"/>',
     };
     const bar = $('#tools');
     for (const [key, tool] of Object.entries(TOOLS)) {
@@ -275,9 +291,6 @@ class App {
     $('#btn-export').addEventListener('click', () => this.exportJson());
     $('#btn-import').addEventListener('click', () => $('#import-file').click());
     $('#import-file').addEventListener('change', (e) => this.importJson(e.target.files[0]));
-    $('#zoom-in').addEventListener('click', () => this.plan.zoomBy(1.25));
-    $('#zoom-out').addEventListener('click', () => this.plan.zoomBy(0.8));
-    $('#zoom-fit').addEventListener('click', () => this.plan.fit());
 
     const nameInput = $('#design-name');
     nameInput.addEventListener('input', () => {
@@ -325,6 +338,15 @@ class App {
     if (mod && e.key.toLowerCase() === 'y') {
       e.preventDefault();
       this.redo();
+      return;
+    }
+    if (this.tab === 'trim') {
+      if (e.code === 'Space' && !this.faceEditor.typed) {
+        this.spaceDown = true;
+        e.preventDefault();
+        return;
+      }
+      if (this.faceEditor.onKey(e)) e.preventDefault();
       return;
     }
     if (this.tab !== 'plan') return;
@@ -409,6 +431,7 @@ class App {
     this.savedId = id;
     this.dirty = dirty;
     this.selection = null;
+    this.trimFace = null;
     this.undoStack = [];
     this.redoStack = [];
     this.syncUnitsButtons();
@@ -540,4 +563,20 @@ function iconSvg(body) {
   return tpl.content.firstElementChild;
 }
 
+/** Loads the trim profile catalog (public/data/trim-profiles.json) before the app starts. */
+async function loadCatalog() {
+  try {
+    const res = await fetch('data/trim-profiles.json', { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const catalog = setCatalog(await res.json());
+    for (const w of catalog.warnings) console.warn(`Trim catalog: ${w}`);
+    return null;
+  } catch (err) {
+    console.error(err);
+    return `Couldn't load the trim catalog (${err.message}); trim will use generic sizes`;
+  }
+}
+
+const catalogProblem = await loadCatalog();
 window.app = new App();
+if (catalogProblem) window.app.toast(catalogProblem, 'error');

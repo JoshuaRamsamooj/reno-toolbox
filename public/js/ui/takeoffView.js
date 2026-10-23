@@ -2,6 +2,7 @@
 import { COUNT_UNITS, computeTakeoff, resolveEstimate, takeoffToCsv } from '../core/takeoff.js';
 import { MM_PER_FT, areaUnit, areaValue, formatLength, lengthValue } from '../core/units.js';
 import { checkbox, field, h, lengthInput, numberInput, select } from './dom.js';
+import { TRIM_CATEGORIES, getProfile, profileLabel } from '../core/trimCatalog.js';
 
 const SHEETS = {
   imperial: { '4x8': [4, 8], '4x10': [4, 10], '4x12': [4, 12] },
@@ -45,8 +46,8 @@ export class TakeoffView {
       ['Ext. walls net', (q) => A(q.exteriorWallNet), aU],
       ['Ceiling', (q) => A(q.ceilingArea), aU],
       ['Bulkheads', (q) => A(q.bulkheadArea), aU],
-      ['Baseboard', (q) => L(q.baseboard), lU],
-      ['Casing', (q) => L(q.doorCasing + q.windowCasing), lU],
+      ['Base (potential)', (q) => L(q.baseboard), lU],
+      ['Casing (potential)', (q) => L(q.doorCasing + q.windowCasing), lU],
       ['D / W / O', (q) => `${q.doors} / ${q.windows} / ${q.openings}`, ''],
     ];
     const rooms = h('table', { class: 'data' },
@@ -65,15 +66,40 @@ export class TakeoffView {
             h('button', { onclick: () => this.downloadCsv(t) }, 'Export CSV'),
           ),
           h('div', { class: 'table-wrap' }, materials),
+          h('h2', {}, 'Trim by wall face'),
+          this.trimSchedule(t),
           h('h2', {}, 'Quantities by room'),
           h('div', { class: 'table-wrap' }, rooms),
           h('p', { class: 'muted small' },
             'Wall areas use interior faces and the room ceiling profile; openings and wall hidden behind bulkheads are deducted (bulkhead soffits, fronts and end caps are counted separately). Doors in shared walls count once per side, so casing covers both faces. ',
-            'Exterior walls are detected automatically (override per wall in the inspector).'),
+            'Exterior walls are detected automatically (override per wall in the inspector). ',
+            'Potential base and casing assume every face and opening is trimmed; the material list uses only the trim you assign.'),
         ),
         this.settings(d),
       ),
     );
+  }
+
+  /** Assigned trim per face: what's on each wall side, in each profile's estimate unit. */
+  trimSchedule(t) {
+    const d = this.app.design;
+    const u = d.units;
+    if (!t.trim.lines.length) {
+      return h('p', { class: 'muted' }, 'No trim assigned yet, so the material list has no trim lines. Use the Trim tool (T) on the plan, the Trim tab, or the room panel to assign baseboard, casing, crown and panelling — per face, per room or for the whole house.');
+    }
+    const qty = (l) => {
+      if (l.unit === 'lf') return `${lengthValue(l.length, u).toFixed(2)} ${u === 'metric' ? 'm' : 'lf'}`;
+      const area = `${areaValue(l.area, u).toFixed(1)} ${areaUnit(u)}`;
+      const p = getProfile(l.profileId);
+      return l.unit === 'sheet' && p ? `${area} (${Math.ceil(l.area / (l.size * p.sheetLength) - 1e-9)} sheets)` : area;
+    };
+    return h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Wall face'), h('th', {}, 'Trim'), h('th', { class: 'num' }, 'Pieces'), h('th', { class: 'num' }, 'Net quantity'))),
+      h('tbody', {}, t.trim.lines.map((l) => h('tr', {},
+        h('td', {}, l.face),
+        h('td', {}, `${TRIM_CATEGORIES[l.category]?.label ?? 'Trim'} – ${profileLabel(l.profileId, l.size, u, l.category)}`),
+        h('td', { class: 'num' }, String(l.pieces)),
+        h('td', { class: 'num' }, qty(l)))))));
   }
 
   settings(d) {

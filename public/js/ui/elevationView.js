@@ -4,8 +4,10 @@ import { analyze, roomElevations } from '../core/model.js';
 import { CEILING_TYPES, profileArea, profileHeightAt } from '../core/ceiling.js';
 import { bandArea } from '../core/bulkhead.js';
 import { formatArea, formatLength } from '../core/units.js';
-import { esc, n, pts } from './svg.js';
+import { esc, n, pts, wainscotMarksSvg } from './svg.js';
 import { h, svgEl } from './dom.js';
+import { designFaces, faceRef, findFace } from '../core/faces.js';
+import { drawOrder, resolveFaceTrim } from '../core/trim.js';
 
 const VW = 640;
 
@@ -49,6 +51,7 @@ export class ElevationView {
     const maxH = Math.max(elev.model.maxHeight, ...elev.walls.flatMap((w) => w.profile.map((p) => p.z)));
     const k = Math.min((VW - 130) / maxLen, 300 / maxH);
     const net = elev.walls.reduce((s, w) => s + faceNet(w), 0);
+    const faces = designFaces(d, analysis);
 
     this.el.replaceChildren(
       h('div', { class: 'elev-header' },
@@ -61,22 +64,26 @@ export class ElevationView {
         h('span', { class: 'spacer' }),
         h('button', { onclick: () => window.print() }, 'Print'),
       ),
-      h('div', { class: 'elev-grid' }, elev.walls.map((w, i) => this.card(d, g, elev, w, i, k, maxH))),
+      h('div', { class: 'elev-grid' }, elev.walls.map((w, i) => this.card(d, g, elev, w, i, k, maxH, faces))),
     );
   }
 
-  card(d, g, elev, w, i, k, maxH) {
+  card(d, g, elev, w, i, k, maxH, faces) {
     const u = d.units;
     const selectWall = () => this.app.select({ type: 'wall', id: w.wallIds[0] });
+    const face = findFace(faces, faceRef(w));
+    const trim = face ? resolveFaceTrim(d, face) : null;
     return h('figure', { class: 'elev-card' },
       h('figcaption', {},
         h('div', {},
           h('strong', {}, `${i + 1}. ${w.compass} wall`),
           h('span', { class: 'muted' }, ` · ${formatLength(w.length, u)} · net ${formatArea(faceNet(w), u)}${w.exterior ? ' · exterior' : ''}`),
         ),
-        h('button', { class: 'keyplan', title: 'Select this wall', onclick: selectWall }, svgEl(keyPlan(g, w))),
+        h('div', { class: 'elev-actions' },
+          h('button', { onclick: () => this.app.openFace(faceRef(w)) }, trim?.items.length ? 'Edit trim' : 'Add trim'),
+          h('button', { class: 'keyplan', title: 'Select this wall', onclick: selectWall }, svgEl(keyPlan(g, w)))),
       ),
-      svgEl(drawElevation(w, k, maxH, u)),
+      svgEl(drawElevation(w, k, maxH, u, trim)),
     );
   }
 }
@@ -107,7 +114,7 @@ function keyPlan(g, w) {
     `<circle cx="${n(eye.x)}" cy="${n(eye.y)}" r="2" class="kp-dot"/></svg>`;
 }
 
-function drawElevation(w, k, maxH, units) {
+function drawElevation(w, k, maxH, units, trim) {
   const L = w.length;
   const x0 = 70;
   const top = 34;
@@ -169,6 +176,27 @@ function drawElevation(w, k, maxH, units) {
     if (wPx > text.length * 5.6 && bandPx > 11) {
       const y = (Y(b.bottom) + Y(profileHeightAt(w.profile, mid))) / 2;
       out.push(`<text class="el-bh-label" x="${n(X(mid))}" y="${n(y)}" text-anchor="middle" dominant-baseline="central">${esc(text)}</text>`);
+    }
+  }
+
+  // A tray ceiling rises beyond the wall top: dashed outline with its height
+  // (before the trim, so crown in the tray draws on top of it).
+  if (w.tray) {
+    const t = w.tray;
+    const [x0, x1, yb, yt] = [X(t.s0), X(t.s1), Y(t.bottom), Y(t.top)];
+    out.push(`<polygon class="el-tray" points="${n(x0)},${n(yb)} ${n(x0)},${n(yt)} ${n(x1)},${n(yt)} ${n(x1)},${n(yb)}"/>`);
+    out.push(`<text class="el-dim-text" x="${n((x0 + x1) / 2)}" y="${n(yt - 6)}" text-anchor="middle">${esc(`tray ${fmt(t.top)} (+${fmt(t.top - t.bottom)})`)}</text>`);
+    out.push(vDim(X(L) + 16, Y(0), yt, fmt(t.top), 'el-dim', 'start'));
+  }
+
+  // Trim drawn on this face in the Trim tab, wainscot first so it never hides the baseboard.
+  for (const r of drawOrder(trim?.items ?? [])) {
+    for (const p of r.pieces) {
+      const rings = [p.poly, ...(p.hole ? [p.hole] : p.holes ?? [])];
+      const d = rings.map((ring) => `M${ring.map((q) => `${n(X(q.s))} ${n(Y(q.z))}`).join('L')}Z`).join('');
+      const pat = p.marks ? ` pat-${p.marks.pattern}` : '';
+      out.push(`<path class="el-trim tc-${r.item.kind === 'wainscot' ? 'wainscot' : r.item.category}${pat}" fill-rule="evenodd" d="${d}"/>`);
+      if (p.marks) out.push(wainscotMarksSvg(p.marks, X, Y, k));
     }
   }
 

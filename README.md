@@ -24,10 +24,23 @@ modules to compile). Environment variables: `PORT` (default 3000), `HOST`
 | Door / Window / Opening | D / N / O | Click on a wall. While placing, the distances to the wall ends are shown. |
 | Select | V | Click to select; Shift+click adds or removes. Drag a box over empty floor to select several: left→right picks walls/openings fully inside, right→left picks anything the box touches. Ctrl+A selects everything. Drag corners, walls (perpendicular) or openings (along their wall). Del deletes the whole selection in one undoable step. Double-click focuses the main field in the inspector. |
 | Pan | P | Drag anywhere to move around the plan. |
+| Trim | T | Hover the side of a wall and click to open that face in the trim editor (see below). |
 | Level | L | Survey a room's subfloor and plan the leveling (see below). |
 
 Other controls: pan with the Pan tool (P), by right-dragging, with the middle mouse button or by holding Space; zoom with the
 scroll wheel; F fits the plan; Ctrl+Z / Ctrl+Shift+Z undo and redo; Ctrl+S saves.
+
+The plan and the wall face editor share one drawing canvas: rulers along the
+top and left (with the cursor marked), an adaptive grid down to 1/16" or
+1 mm, snap guides, and a bar with **Snap (S)**, **Grid (G)**, zoom − / + and
+**Fit**. With snapping off, points round to 1/16" or 1 mm only.
+
+Assigned trim shows on the plan: baseboard as a solid band along the floor
+line and crown (including tray crown) as a dashed band at its projection,
+each mitred where runs meet at a corner and stopped square at door gaps.
+Cased doors and windows show their casing legs beside the jambs (on the side
+of the wall the casing is on), and windows their stool or sill. "Show trim on
+the plan" turns this off.
 
 Rooms are **detected automatically** from enclosed areas, so you never have
 to define them by hand. Drawing a wall across a room splits it, and deleting
@@ -36,8 +49,8 @@ through these edits.
 
 The inspector edits the selection:
 - **Room:** name; ceiling profile (flat, shed, cathedral/gable, tray) with
-  heights, slope or ridge direction, and tray depth/inset; flooring and crown
-  moulding toggles; bulkheads; the list of interior wall faces.
+  heights, slope or ridge direction, and tray depth/inset; flooring toggle;
+  bulkheads; trim for the room's faces; the list of interior wall faces.
 - **Bulkheads** (in the room inspector): a dropped box along one wall with a
   depth into the room, an underside height (defaults to 12"/300 mm below the
   ceiling and follows it), and an optional start/length along the wall. Use
@@ -50,14 +63,79 @@ The inspector edits the selection:
   edits, and delete all.
 - **Wall:** centreline length or the interior face length on either side.
   Changing a length *stretches* the plan beyond end B, so rectangles stay
-  rectangular. Also thickness and the exterior/interior override.
+  rectangular. Also thickness, the exterior/interior override, and an
+  "Edit trim" button for each side of the wall.
 - **Opening:** type, width, height, sill, gaps to the wall ends, and door
   hinge/swing flip.
-- **Nothing selected:** default wall thickness, default ceiling height, and
-  the dimension display (interior faces, centrelines or hidden).
+- **Nothing selected:** default wall thickness, default ceiling height, the
+  dimension display (interior faces, centrelines or hidden), and whether
+  trimmed wall faces are marked on the plan ("Show trim on the plan").
 
 Units can be switched between imperial and metric at any time. All geometry is
 stored in millimetres; only the display changes.
+
+## Trim and panelling
+
+Trim belongs to a **wall face**: one side of a wall run. A wall between a
+kitchen and a hallway has two faces with independent trim, and exterior
+walls have an interior face and an exterior face. Only quantities are
+estimated (linear feet/metres, area, sheet count); there is no pricing.
+
+Open a face with the Trim tool (T) on the plan, the "Edit trim" buttons on
+the wall inspector and Elevations cards, or the face picker on the **Trim**
+tab. The face is drawn on its own as a true-scale elevation: one uniform
+scale for length and height, so it stays exact at any zoom (scroll) or pan
+(right/middle-drag, Space+drag or P). Rulers show distance from the left
+corner and height above the finished floor (AFF), and the grid adapts to the
+zoom down to 1/16" or 1 mm. Openings are placed from the plan geometry, so
+casing is measured from their real size and position.
+
+| Tool | Key | How |
+|------|-----|-----|
+| Select | V | Click trim to select; drag a chair rail or box to move it; drag handles to resize boxes and wainscot or to shorten a run. Del deletes, X removes the clicked piece of a run, arrows nudge (Shift = 1" / 10 mm), Ctrl+D duplicates a box. |
+| Baseboard / Crown | B / C | Click for a run along the whole face, or drag a partial run. Baseboard gaps at doors and cased openings (stopping at the casing); crown follows sloped ceilings and gaps at bulkheads. Gaps follow the openings when they move. With a tray ceiling, click inside the dashed tray outline for **tray crown**: it runs along the tray side above that wall, at the tray height. |
+| Chair rail | R | Click at a height (the top edge), or type a height such as `36` + Enter. Breaks where it meets openings and their casing. |
+| Casing | O | Click a door, window or opening to case it on this side. Doors get two legs and a head; windows are picture-framed, or have a stool, apron and sill (toggles in the panel). Corners are drawn as 45° mitres (legs stand square on the floor or stool), and lengths are measured at the long point. |
+| Panel box | M | Drag a picture-frame box, or type a size such as `24x18` + Enter. "Lay out boxes" repeats a box evenly between openings. |
+| Wainscot | W | Click for wainscot along the face at the default height, type a height, or drag part of the wall. Measured as area (openings deducted) or sheets. |
+
+Everything snaps (to corners, floor, ceiling, opening edges, heads and sills,
+casing, bulkheads, other trim and the grid; Shift turns snapping off, S and G
+toggle snapping and the grid), the selection shows its dimensions, and every
+value can be typed in the panel. In the trim editor bare numbers are inches
+on imperial plans and millimetres on metric ones. All edits are undoable.
+
+**Bulk assignment.** Trim can be assigned to one face, a whole room (all its
+interior faces) or the whole house (every room face), from the trim panel,
+the room inspector or the plan settings. A **package** is a named set of
+trim (e.g. "Standard Main Floor" = 5¼" baseboard + 3½" casing + chair rail at
+36") saved with the plan; packages can be built in the panel or saved from a
+face. Tray crown is its own kind (in packages and the "+ Tray crown"
+buttons) and only lands on walls under a tray ceiling. Applying trim or a
+package replaces those kinds of trim on each face,
+and each bulk action is a single Undo.
+
+**Bulk removal.** One kind of trim (baseboard, crown, tray crown, chair rail,
+door or window casing, wainscot) can be deleted from a whole room or the whole
+house at once: the "−" buttons in the room inspector, plan settings and trim
+panel list the kinds present, and a selected piece has **Delete from whole
+room** / **Delete from whole house** (Shift+Del in the editor = whole room).
+Other kinds are left alone: removing crown keeps tray crown, and removing
+wainscot keeps hand-placed panel boxes. Each removal is a single Undo.
+
+**Profile catalog.** Profiles live in `public/data/trim-profiles.json`, not
+in code. Each has an `id`, `name`, `category` (baseboard, crown, chair-rail,
+panel-moulding, door-casing, window-casing, window-stool, window-apron,
+window-sill), `widths` written with units (`"5 1/4\""`, `"90mm"`) and an
+estimate `unit` (`lf`, `sf` or `sheet`; sheet goods also give `sheetLength`).
+Optional: `defaultWidth`, `default: true`, `description`, and for wall
+panelling `pattern` (`beadboard`, `shiplap`, `board-batten` or `panel`)
+with `spacing` (groove or batten spacing, with units), which decides how
+wainscot is drawn: grooves, boards at the board width, battens at the
+batten width, or plain sheets, plus seams every sheet width for sheet goods.
+Without a pattern, sheet goods draw as plain sheets and area goods as boards.
+Invalid entries
+are skipped with a console warning. Sizes always display in the plan's units.
 
 ## Floor leveling
 
@@ -120,11 +198,14 @@ west → east and rows numbered north → south, so every node has a name like
   swings.
 - **Elevations:** each wall face of the selected room as seen from inside,
   at a shared scale. Shows the ceiling profile (peaks and slopes), openings
-  with sizes, sill heights, chain and overall dimensions, and a key plan.
-  Printable.
+  with sizes, sill heights, chain and overall dimensions, any trim, and a key
+  plan. Printable.
+- **Trim:** the wall face editor (see above).
 - **Takeoff:** per-room quantities (floor, perimeter, gross/net wall area,
-  exterior wall area, ceiling surface, baseboard, casing, opening counts), a
-  first-pass material list with waste factors, and CSV export.
+  exterior wall area, ceiling surface, potential baseboard and casing,
+  opening counts), a first-pass material list with waste factors, assigned
+  trim by profile and size and by wall face, and CSV export. Trim lines come
+  only from assigned trim.
 
 ## Saving
 
@@ -144,8 +225,12 @@ public/js/core/    Pure, DOM-free logic (shared by the browser and the tests)
   ceiling.js       ceiling profiles → height field, wall-top profiles, surface area
   bulkhead.js      bulkhead footprints, covered wall bands, finished surfaces
   leveling.js      survey grid, interpolated floor surface, cut/fill plan, compound yield
+  faces.js         every wall face (room and exterior) with its profile and openings
+  trimCatalog.js   loads and validates the trim profile catalog
+  trim.js          trim items, resolved pieces and quantities, re-attachment, bulk apply
   takeoff.js       quantities and material list
-public/js/ui/      SVG plan editor, elevations, inspector, takeoff view
+public/data/       trim-profiles.json (the profile catalog)
+public/js/ui/      shared drawing canvas (canvas.js), SVG plan editor, elevations, wall face (trim) editor, inspector, takeoff view
 test/              node:test suites for core logic and the API
 ```
 
@@ -161,8 +246,22 @@ segments, and re-homes openings.
 
 `analyze(design)` is the single source of derived data. For each room it
 returns the interior polygon (centrelines offset by half the wall thickness)
-and the merged wall faces with their openings and exterior spans. The
-elevation and takeoff views build on top of it.
+and the merged wall faces with their openings and exterior spans, plus the
+exterior faces around the outside of the building. The elevation, trim and
+takeoff views build on top of it.
+
+Trim (design version 2) is stored per face in `faceTrim`:
+`{ id, wallIds, outward, p0, p1, items }`, where the first four record the
+face at the last edit so `normalize()` can re-attach it: moved walls keep
+their trim, a face split by a new wall gives each piece a copy, merged faces
+combine, and casing goes with its opening. Items use face coordinates (mm
+from the face's left end as seen facing it, mm above the floor): runs
+(`start`/`end` null = to the corner, plus user `cuts`; gaps at openings are
+derived; crown with `placement: 'tray'` runs along the tray side above the
+wall instead of the wall top), casing (by `openingId`, with `reveal` and optional
+`stool`/`apron`/`sill`), boxes and wainscot. `trimPackages` holds named
+sets of `{ category, profileId, size, height?, … }`. Version 1 designs
+are migrated on load: a room's crown flag becomes crown runs on its faces.
 
 ### Extending the estimate
 

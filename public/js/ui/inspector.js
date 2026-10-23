@@ -8,6 +8,8 @@ import {
 } from '../core/leveling.js';
 import { MM_PER_IN, formatArea, formatDeviation, formatLength, formatLinear, unitDefaults } from '../core/units.js';
 import { checkbox, deviationInput, field, h, lengthInput, numberInput, select } from './dom.js';
+import { designFaces, faceRef } from '../core/faces.js';
+import { clearScope, faceSummary, packageApplier, packageManager, quickApply, quickRemove } from './trimPanels.js';
 
 const LITRES_PER_CU_FT = 28.3168;
 
@@ -21,7 +23,8 @@ export class Inspector {
     const { design, selection } = this.app;
     const analysis = analyze(design);
     let body;
-    if (this.app.plan.tool === 'level') body = this.levelPanel(analysis);
+    if (this.app.tab === 'trim') body = this.app.faceEditor.panel();
+    else if (this.app.plan.tool === 'level') body = this.levelPanel(analysis);
     else if (selection?.type === 'room') body = this.roomPanel(analysis, selection.id);
     else if (selection?.type === 'wall') body = this.wallPanel(analysis, selection.id);
     else if (selection?.type === 'opening') body = this.openingPanel(analysis, selection.id);
@@ -61,6 +64,13 @@ export class Inspector {
         'Rooms without their own height use this'),
       field('Plan dimensions', select(d.settings.dimensionMode, { interior: 'Interior faces (per room)', centerline: 'Wall centrelines', off: 'Hidden' },
         (v) => this.edit('Dimension mode', (x) => { x.settings.dimensionMode = v; }))),
+      checkbox('Show trim on the plan', d.settings.showTrim !== false, (v) => this.edit(v ? 'Show trim' : 'Hide trim', (x) => { x.settings.showTrim = v; })),
+      h('h3', {}, 'Trim (whole house)'),
+      quickApply(this.app, {}, 'house', { tray: analysis.rooms.some((g) => resolveRoomCeiling(d, g.room).type === 'tray') }),
+      quickRemove(this.app, {}, 'house'),
+      packageApplier(this.app, {}, ['house']),
+      h('div', { class: 'button-row' }, h('button', { onclick: () => this.app.showTab('trim') }, 'Open trim editor')),
+      h('details', { class: 'packages' }, h('summary', {}, `Trim packages (${d.trimPackages.length})`), ...packageManager(this.app)),
       h('h3', {}, 'Quick start'),
       h('ol', { class: 'help' },
         h('li', {}, h('b', {}, 'Room tool (R): '), 'drag a rectangle, or click a corner and type the interior size, e.g. ', h('code', {}, u === 'metric' ? '3.6x4.2' : "12x10'6"), ' then Enter.'),
@@ -68,7 +78,8 @@ export class Inspector {
         h('li', {}, h('b', {}, 'Wall tool (W): '), 'click corners; type a length like ', h('code', {}, u === 'metric' ? '2.4' : "8'6"), ' + Enter to set each wall exactly. Ending on a wall or corner joins it.'),
         h('li', {}, h('b', {}, 'Door (D), Window (N), Opening (O): '), 'click on a wall.'),
         h('li', {}, 'Click a room to name it and set its ceiling height and profile.'),
-        h('li', {}, 'Switch to ', h('b', {}, 'Elevations'), ' or ', h('b', {}, 'Takeoff'), ' at the top of the canvas.'),
+        h('li', {}, h('b', {}, 'Trim tool (T): '), 'click the side of a wall to draw baseboard, casing, chair rail and panels on it.'),
+        h('li', {}, 'Switch to ', h('b', {}, 'Elevations'), ', ', h('b', {}, 'Trim'), ' or ', h('b', {}, 'Takeoff'), ' at the top of the canvas.'),
       ),
       h('p', { class: 'muted small' }, 'Select several: drag a box or Shift+click; Ctrl+A selects all; Del deletes. Pan: P, right-drag, middle mouse or hold Space. Zoom: scroll wheel. Undo: Ctrl+Z.'),
     );
@@ -122,7 +133,8 @@ export class Inspector {
       ...this.bulkheadFields(g, editRoom),
       h('h3', {}, 'Finishes'),
       checkbox('Include in flooring estimate', room.flooring !== false, (v) => editRoom('Flooring', (r) => { r.flooring = v; })),
-      checkbox('Crown moulding', !!room.crown, (v) => editRoom('Crown', (r) => { r.crown = v; })),
+      h('h3', {}, 'Trim'),
+      ...this.roomTrimFields(g),
       h('h3', {}, 'Walls (interior faces)'),
       h('ul', { class: 'wall-list' }, g.walls.map((w, i) => h('li', {},
         h('button', { class: 'link', onclick: () => this.app.select({ type: 'wall', id: w.wallIds[0] }) },
@@ -134,6 +146,25 @@ export class Inspector {
         h('button', { class: 'danger', onclick: () => { this.edit('Delete room', (x) => deleteRoom(x, roomId)); this.app.select(null); } }, 'Delete room'),
       ),
     );
+  }
+
+  /** Room trim: per-face list with editor links, one-click assignments and packages for the room. */
+  roomTrimFields(g) {
+    const d = this.app.design;
+    const roomId = g.room.id;
+    const faces = designFaces(d, analyze(d)).filter((f) => f.kind === 'room' && f.roomId === roomId);
+    const target = { roomId };
+    return [
+      h('ul', { class: 'wall-list' }, faces.map((f) => h('li', {},
+        h('button', { class: 'link', onclick: () => this.app.openFace(faceRef(f)) }, `${f.number}. ${f.compass}`),
+        h('span', { class: 'muted small' }, faceSummary(d, f) || 'no trim'),
+        h('button', { class: 'link', onclick: () => this.app.openFace(faceRef(f)) }, 'Edit')))),
+      h('p', { class: 'muted small' }, 'Add to every wall of this room (one Undo):'),
+      quickApply(this.app, target, 'room', { tray: resolveRoomCeiling(d, g.room).type === 'tray' }),
+      quickRemove(this.app, target, 'room'),
+      packageApplier(this.app, target, ['room']),
+      h('button', { class: 'link danger', onclick: () => clearScope(this.app, 'room', target) }, 'Clear this room\'s trim'),
+    ];
   }
 
   bulkheadFields(g, editRoom) {
@@ -200,6 +231,7 @@ export class Inspector {
       });
 
     const openings = d.openings.filter((o) => o.wallId === wallId);
+    const wallFaces = designFaces(d, analysis).filter((f) => f.wallIds.includes(wallId));
     return h('div', { class: 'panel' },
       h('div', { class: 'panel-kicker' }, 'Wall'),
       field('Centreline length', lengthInput(L, u, (mm) => this.edit('Wall length', (x) => setWallLength(x, wallId, mm)), { min: 1, name: 'wall-length' }),
@@ -213,6 +245,9 @@ export class Inspector {
         yes: 'Exterior – insulate',
         no: 'Interior – no insulation',
       }, (v) => editWall('Wall type', (ww) => { ww.exterior = v; }))),
+      wallFaces.length ? h('h3', {}, 'Trim') : null,
+      wallFaces.length ? h('div', { class: 'button-row' }, wallFaces.map((f) => h('button', { onclick: () => this.app.openFace(faceRef(f)), title: faceSummary(d, f) || 'No trim yet' },
+        `Edit trim · ${f.kind === 'room' ? `${f.room.room?.name ?? 'Room'} side` : 'exterior side'}`))) : null,
       openings.length ? h('h3', {}, 'Openings in this wall') : null,
       openings.length ? h('ul', { class: 'wall-list' }, openings.map((o) => h('li', {},
         h('button', { class: 'link', onclick: () => this.app.select({ type: 'opening', id: o.id }) }, OPENING_TYPES[o.type]),

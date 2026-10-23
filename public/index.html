@@ -36,17 +36,13 @@
   <div class="main">
     <nav class="toolbar">
       <div id="tools"></div>
-      <div class="zoom">
-        <button id="zoom-in" class="icon" title="Zoom in">+</button>
-        <button id="zoom-out" class="icon" title="Zoom out">−</button>
-        <button id="zoom-fit" class="icon" title="Fit plan (F)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
-      </div>
     </nav>
 
     <section class="workspace">
       <div class="tabs" role="tablist">
         <button data-tab="plan" class="active">Plan</button>
         <button data-tab="elevations">Elevations</button>
+        <button data-tab="trim">Trim</button>
         <button data-tab="takeoff">Takeoff</button>
       </div>
       <div class="view" id="view-plan">
@@ -54,6 +50,7 @@
         <div class="compass" title="Plan north is up">N<span>↑</span></div>
       </div>
       <div class="view scroll" id="view-elevations" hidden></div>
+      <div class="view face-editor" id="view-trim" hidden></div>
       <div class="view scroll" id="view-takeoff" hidden></div>
     </section>
 

@@ -6,6 +6,9 @@ import { profileArea, profileHeightAt } from './ceiling.js';
 import { lerp } from './geometry.js';
 import { bandArea, bulkheadSurfaces } from './bulkhead.js';
 import { analyzeLeveling, resolveCompound } from './leveling.js';
+import { designFaces } from './faces.js';
+import { mergeTrimLines, trimTakeoff } from './trim.js';
+import { TRIM_CATEGORIES, getProfile, profileLabel } from './trimCatalog.js';
 import { MM2_PER_FT2, MM2_PER_M2, MM_PER_FT, areaValue, areaUnit, lengthValue } from './units.js';
 
 /** Material units counted in whole pieces. */
@@ -43,10 +46,9 @@ function emptyQuantities() {
     ceilingInsulation: 0,
     bulkheadArea: 0,
     bulkheadBead: 0,
-    baseboard: 0,
+    baseboard: 0, // potential baseboard and casing on every face (assigned trim is in `trim`)
     doorCasing: 0,
     windowCasing: 0,
-    crown: 0,
     doors: 0,
     windows: 0,
     openings: 0,
@@ -104,6 +106,7 @@ function measureFace(q, length, profile, openings, segments, bands = []) {
 export function computeTakeoff(d) {
   const analysis = analyze(d);
   const idx = indexDesign(d);
+  const trim = trimTakeoff(d, designFaces(d, analysis));
   const rooms = analysis.rooms.map((g) => {
     const q = emptyQuantities();
     const elev = roomElevations(d, g);
@@ -119,7 +122,6 @@ export function computeTakeoff(d) {
       q.bulkheadArea += surf.area;
       q.bulkheadBead += surf.bead;
     }
-    if (g.room?.crown) q.crown = g.perimeter;
     for (const w of elev.walls) measureFace(q, w.length, w.profile, w.openings, w.segments, w.bands);
 
     // Partial-height/stub walls inside the room are finished on both sides.
@@ -142,14 +144,57 @@ export function computeTakeoff(d) {
     // Linked rooms share one analysis; each room takes its own share of it.
     const lv = g.room?.leveling?.readings?.length ? analyzeLeveling(d, g, { analysis }) : null;
     const leveling = lv?.ready ? lv.byRoom.get(g.room.id) ?? null : null;
-    return { id: g.room?.id ?? null, name: g.room?.name ?? 'Unnamed room', flooring: g.room?.flooring !== false, ceilingType: elev.spec.type, q, leveling };
+    const roomTrim = mergeTrimLines(trim.lines.filter((l) => l.faceKind === 'room' && l.roomId === (g.room?.id ?? null)));
+    return { id: g.room?.id ?? null, name: g.room?.name ?? 'Unnamed room', flooring: g.room?.flooring !== false, ceilingType: elev.spec.type, q, leveling, trim: roomTrim };
   });
 
   const totals = emptyQuantities();
   for (const r of rooms) for (const k of Object.keys(totals)) totals[k] += r.q[k];
   const flooredArea = rooms.filter((r) => r.flooring).reduce((s, r) => s + r.q.floorArea, 0);
 
-  return { rooms, totals, materials: [...materialList(d, totals, flooredArea), ...levelingMaterials(d, rooms)], counts: countOpenings(d) };
+  return {
+    rooms,
+    totals,
+    trim,
+    materials: [...materialList(d, totals, flooredArea), ...trimMaterials(d, trim.totals), ...levelingMaterials(d, rooms)],
+    counts: countOpenings(d),
+  };
+}
+
+const TRIM_ORDER = Object.keys(TRIM_CATEGORIES);
+
+/**
+ * Assigned trim, one line per profile and size: linear profiles in lf/m and
+ * stock pieces, area goods in sq ft/m², sheet goods in whole sheets.
+ */
+function trimMaterials(d, lines) {
+  const e = resolveEstimate(d);
+  const u = d.units;
+  const L = (mm) => lengthValue(mm, u);
+  const A = (mm2) => areaValue(mm2, u);
+  const withWaste = (v) => v * (1 + e.trimWaste / 100);
+  const lUnit = u === 'metric' ? 'm' : 'lf';
+  const aUnit = areaUnit(u);
+  const pieceLabel = u === 'metric' ? `${(e.trimLength / 1000).toFixed(1)} m` : `${Math.round(e.trimLength / MM_PER_FT)}'`;
+  const sorted = [...lines].sort((p, q) => TRIM_ORDER.indexOf(p.category) - TRIM_ORDER.indexOf(q.category) || p.size - q.size);
+  return sorted.map((l) => {
+    const label = `${TRIM_CATEGORIES[l.category]?.label ?? 'Trim'} – ${profileLabel(l.profileId, l.size, u, l.category)}`;
+    const base = { key: `trim:${l.key}`, category: 'Trim', label, trim: l };
+    if (l.unit === 'sheet') {
+      const sheet = l.size * (getProfile(l.profileId)?.sheetLength ?? 0);
+      return {
+        ...base, quantity: sheet > 0 ? Math.ceil(withWaste(l.area) / sheet - 1e-9) : 0, unit: 'sheets',
+        detail: `${A(l.area).toFixed(1)} ${aUnit} net + ${e.trimWaste}% waste`,
+      };
+    }
+    if (l.unit === 'sf') {
+      return { ...base, quantity: A(withWaste(l.area)), unit: aUnit, detail: `${A(l.area).toFixed(1)} ${aUnit} net + ${e.trimWaste}% waste` };
+    }
+    return {
+      ...base, quantity: L(withWaste(l.length)), unit: lUnit,
+      detail: `${Math.ceil(withWaste(l.length) / e.trimLength - 1e-9)} × ${pieceLabel} pieces (net ${L(l.length).toFixed(1)} ${lUnit} in ${l.pieces} piece${l.pieces === 1 ? '' : 's'} + ${e.trimWaste}% waste)`,
+    };
+  });
 }
 
 /** Self-leveler bags (contingency applied to the plan total) and grinding, from rooms with a floor survey. */
@@ -198,8 +243,6 @@ function materialList(d, t, flooredArea) {
   const withWaste = (v, pct) => v * (1 + pct / 100);
   const aUnit = areaUnit(u);
   const lUnit = u === 'metric' ? 'm' : 'lf';
-  const trimPieceLabel = u === 'metric' ? `${(e.trimLength / 1000).toFixed(1)} m` : `${Math.round(e.trimLength / MM_PER_FT)}'`;
-  const pieces = (mm) => Math.ceil(withWaste(mm, e.trimWaste) / e.trimLength - 1e-9);
   const sheetArea = e.drywallSheet.w * e.drywallSheet.h;
   const sheetLabel = u === 'metric'
     ? `${e.drywallSheet.w} × ${e.drywallSheet.h} mm`
@@ -238,26 +281,6 @@ function materialList(d, t, flooredArea) {
       detail: e.insulateCeilings ? `${A(t.ceilingInsulation).toFixed(1)} ${aUnit} ceiling + ${e.insulationWaste}% waste` : 'Disabled in estimate settings',
     },
     {
-      key: 'baseboard', category: 'Trim', label: 'Baseboard',
-      quantity: L(withWaste(t.baseboard, e.trimWaste)), unit: lUnit,
-      detail: `${pieces(t.baseboard)} × ${trimPieceLabel} pieces (net ${L(t.baseboard).toFixed(1)} ${lUnit}, doorways excluded)`,
-    },
-    {
-      key: 'door-casing', category: 'Trim', label: 'Door & opening casing',
-      quantity: L(withWaste(t.doorCasing, e.trimWaste)), unit: lUnit,
-      detail: `${pieces(t.doorCasing)} × ${trimPieceLabel} pieces (each side of ${t.doors + t.openings} door/opening faces)`,
-    },
-    {
-      key: 'window-casing', category: 'Trim', label: 'Window casing',
-      quantity: L(withWaste(t.windowCasing, e.trimWaste)), unit: lUnit,
-      detail: `${pieces(t.windowCasing)} × ${trimPieceLabel} pieces (${t.windows} window faces, picture-frame)`,
-    },
-    {
-      key: 'crown', category: 'Trim', label: 'Crown moulding',
-      quantity: L(withWaste(t.crown, e.trimWaste)), unit: lUnit,
-      detail: t.crown ? `${pieces(t.crown)} × ${trimPieceLabel} pieces` : 'Enable per room in the room inspector',
-    },
-    {
       key: 'paint', category: 'Paint', label: 'Paint – walls & ceilings',
       quantity: paintArea / coverage, unit: u === 'metric' ? 'L' : 'gal',
       detail: `${A(finished).toFixed(1)} ${aUnit} × ${e.paintCoats} coats @ ${e.paintCoverage[u]} ${aUnit}/${u === 'metric' ? 'L' : 'gal'}`,
@@ -285,6 +308,13 @@ export function takeoffToCsv(d, takeoff) {
   rows.push([]);
   rows.push(['Material', 'Quantity', 'Unit', 'Notes']);
   for (const m of takeoff.materials) rows.push([m.label, m.quantity.toFixed(COUNT_UNITS.has(m.unit) ? 0 : 2), m.unit, m.detail]);
+  if (takeoff.trim?.lines.length) {
+    rows.push([]);
+    rows.push(['Trim by wall face', 'Item', `Length (${lU})`, `Area (${aU})`, 'Estimate unit']);
+    for (const l of takeoff.trim.lines) {
+      rows.push([l.face, `${TRIM_CATEGORIES[l.category]?.label ?? 'Trim'} – ${profileLabel(l.profileId, l.size, u, l.category)}`, L(l.length), l.unit === 'lf' ? '' : A(l.area), l.unit]);
+    }
+  }
   return rows.map((r) => r.map(esc).join(',')).join('\n');
 }
 

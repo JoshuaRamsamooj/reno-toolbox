@@ -206,3 +206,21 @@ test('crossing walls are split at the intersection', () => {
   assert.equal(d.walls.length, 4);
   assert.equal(d.nodes.length, 5);
 });
+
+test('tray ceilings show above each wall at the tray height, inset from the corners', () => {
+  const d = design();
+  addRectangle(d, { x: 0, y: 0 }, { x: 16 * FT, y: 12 * FT });
+  normalize(d);
+  d.rooms[0].ceiling = { ...d.rooms[0].ceiling, type: 'tray', height: 8 * FT, trayDepth: 12 * MM_PER_IN, trayInset: 24 * MM_PER_IN };
+  const g = analyze(d).rooms[0];
+  const elev = roomElevations(d, g);
+  for (const w of elev.walls) {
+    near(w.profile[0].z, 8 * FT); // the walls stop at the perimeter height…
+    near(w.tray.bottom, 8 * FT); // …and the tray rises above them
+    near(w.tray.top, 9 * FT);
+    near(w.tray.s0, 24 * MM_PER_IN);
+    near(w.tray.s1, w.length - 24 * MM_PER_IN);
+  }
+  d.rooms[0].ceiling.type = 'flat';
+  assert.ok(roomElevations(d, analyze(d).rooms[0]).walls.every((w) => w.tray === null));
+});

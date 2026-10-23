@@ -123,6 +123,39 @@ export function wallTopProfile(model, P, Q) {
   return ts.map((t) => ({ s: t * L, z: model.heightAt(lerp(P, Q, t)) }));
 }
 
+/**
+ * Where a tray ceiling shows above a wall face P→Q, as seen in elevation:
+ * the tray's extent along the face (s from P), the wall top it rises from
+ * and the tray height. Null for other ceilings or a degenerate tray.
+ */
+export function trayOverWall(model, P, Q) {
+  const tray = model.tray;
+  if (!tray) return null;
+  const L = Math.hypot(Q.x - P.x, Q.y - P.y);
+  if (L <= 0) return null;
+  const dir = { x: (Q.x - P.x) / L, y: (Q.y - P.y) / L };
+  const along = tray.polygon.map((v) => dot({ x: v.x - P.x, y: v.y - P.y }, dir));
+  const s0 = Math.max(0, Math.min(...along));
+  const s1 = Math.min(L, Math.max(...along));
+  if (s1 - s0 <= 0) return null;
+  // The tray side that runs along this wall (parallel, nearest to it): where tray crown goes.
+  const n = tray.polygon.length;
+  let edge = null;
+  let nearest = Infinity;
+  for (let i = 0; i < n; i++) {
+    const a = tray.polygon[i];
+    const b = tray.polygon[(i + 1) % n];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len <= 0 || ((b.x - a.x) * dir.x + (b.y - a.y) * dir.y) / len < 0.9999) continue;
+    const off = Math.abs((a.x - P.x) * dir.y - (a.y - P.y) * dir.x);
+    if (off < nearest) {
+      nearest = off;
+      edge = { s0: along[i], s1: along[(i + 1) % n], a: { x: a.x, y: a.y }, b: { x: b.x, y: b.y } };
+    }
+  }
+  return { s0, s1, bottom: model.spec.height, top: tray.height, edge };
+}
+
 /** Height of a piecewise-linear profile at distance s. */
 export function profileHeightAt(profile, s) {
   if (s <= profile[0].s) return profile[0].z;

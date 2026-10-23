@@ -7,8 +7,9 @@ import {
   perp, pointInPolygon, polygonArea, polygonPerimeter, projectParam, scale, segmentIntersection, sub,
 } from './geometry.js';
 import { MM_PER_IN, formatLength, unitDefaults } from './units.js';
-import { ceilingModel, defaultCeiling, profileHeightAt, resolveCeiling, wallTopProfile } from './ceiling.js';
+import { ceilingModel, defaultCeiling, profileHeightAt, resolveCeiling, trayOverWall, wallTopProfile } from './ceiling.js';
 import { bulkheadDefaults, faceBands, findBulkheadFace, resolveBulkheads } from './bulkhead.js';
+import { migrateRoomCrown, sanitizeFaceTrim, sanitizePackages, syncFaceTrim } from './trim.js';
 
 export const EPS = 1; // mm: nodes closer than this are the same point
 const MIN_FACE_AREA = 10000; // mm²: anything smaller is a sliver, not a room
@@ -24,14 +25,16 @@ export const OPENING_TYPES = { door: 'Door', window: 'Window', opening: 'Opening
 export function createDesign(units = 'imperial') {
   const d = unitDefaults(units);
   return {
-    version: 1,
+    version: 2,
     units,
-    settings: { wallThickness: d.wallThickness, ceilingHeight: d.ceilingHeight, dimensionMode: 'interior' },
+    settings: { wallThickness: d.wallThickness, ceilingHeight: d.ceilingHeight, dimensionMode: 'interior', showTrim: true },
     estimate: {},
     nodes: [],
     walls: [],
     openings: [],
     rooms: [],
+    faceTrim: [],
+    trimPackages: [],
   };
 }
 
@@ -45,9 +48,10 @@ export function migrateDesign(raw) {
     w.thickness ??= d.settings.wallThickness;
     w.exterior ??= 'auto';
   });
+  d.faceTrim = sanitizeFaceTrim(d.faceTrim);
+  d.trimPackages = sanitizePackages(d.trimPackages);
   d.rooms.forEach((r) => {
     r.ceiling = { ...defaultCeiling(), ...(r.ceiling ?? {}) };
-    r.crown ??= false;
     r.flooring ??= true;
     r.bulkheads = Array.isArray(r.bulkheads) ? r.bulkheads : [];
     if (r.leveling && typeof r.leveling === 'object') {
@@ -57,6 +61,9 @@ export function migrateDesign(raw) {
       delete r.leveling;
     }
   });
+  // Version 1 kept crown as a per-room flag; it is now a crown run on each face.
+  if (d.rooms.some((r) => 'crown' in r)) migrateRoomCrown(d);
+  d.version = 2;
   return d;
 }
 
@@ -365,6 +372,7 @@ export function normalize(d) {
   removeOrphans(d);
   clampOpenings(d);
   syncRooms(d);
+  if (d.faceTrim?.length) syncFaceTrim(d, analyze(d));
   return d;
 }
 
@@ -674,12 +682,16 @@ export function analyze(d) {
     }
   }
   for (const info of wallInfo.values()) info.roomSides ??= [null, null];
-  return { idx, faces, rooms, wallInfo };
+  // The outside of the building: each component's outer face, offset outward.
+  const exteriorFaces = faces.filter((f) => f.area < 0).flatMap((f) => exteriorGeometry(f, idx, wallInfo, d));
+  return { idx, faces, rooms, wallInfo, exteriorFaces };
 }
 
-function roomGeometry(face, idx, wallInfo, d) {
-  const { edges, spurs } = stripSpurs(face.halfEdges);
-  if (edges.length < 3) return null;
+/**
+ * Groups a face cycle's half-edges into straight runs (collinear walls of the
+ * same thickness), the unit a wall face is made of. Null when degenerate.
+ */
+function groupEdges(edges, idx, wallInfo) {
   const segs = edges.map((h) => {
     const P = idx.nodes.get(h.from);
     const Q = idx.nodes.get(h.to);
@@ -698,19 +710,25 @@ function roomGeometry(face, idx, wallInfo, d) {
     if (last && mergeable(last.segs[last.segs.length - 1], s)) last.segs.push(s);
     else groups.push({ segs: [s] });
   }
-  if (groups.length < 3) return null;
-  const centerPolygon = groups.map((g) => g.segs[0].P);
-  const polygon = offsetPolygon(centerPolygon, groups.map((g) => g.segs[0].thickness / 2));
-  const area = polygonArea(polygon);
-  if (area <= 0) return null;
+  return groups.length < 3 ? null : groups;
+}
 
-  const openingsByWall = new Map();
+function openingsByWallId(d) {
+  const map = new Map();
   for (const o of d.openings) {
-    if (!openingsByWall.has(o.wallId)) openingsByWall.set(o.wallId, []);
-    openingsByWall.get(o.wallId).push(o);
+    if (!map.has(o.wallId)) map.set(o.wallId, []);
+    map.get(o.wallId).push(o);
   }
+  return map;
+}
 
-  const walls = groups.map((g, i) => {
+/**
+ * Wall faces along an offset polygon: one per group, running P→Q with the
+ * face's region on the perp(dir) side, so P is on the left as seen facing
+ * the wall and `outward` points from the viewer into the wall.
+ */
+function buildFaces(groups, polygon, idx, openingsByWall) {
+  return groups.map((g, i) => {
     const P = polygon[i];
     const Q = polygon[(i + 1) % groups.length];
     const dir = g.segs[0].dir;
@@ -749,11 +767,25 @@ function roomGeometry(face, idx, wallInfo, d) {
       exterior: g.segs.some((s) => s.exterior),
       segments,
       wallIds: g.segs.map((s) => s.h.wall.id),
+      // Which side of each wall this face is on (half-edge direction: 0 = A→B).
+      sides: g.segs.map((s) => ({ wallId: s.h.wall.id, dir: s.h.dir })),
       centerP: g.segs[0].P,
       centerQ: g.segs[g.segs.length - 1].Q,
       openings,
     };
   });
+}
+
+function roomGeometry(face, idx, wallInfo, d) {
+  const { edges, spurs } = stripSpurs(face.halfEdges);
+  if (edges.length < 3) return null;
+  const groups = groupEdges(edges, idx, wallInfo);
+  if (!groups) return null;
+  const centerPolygon = groups.map((g) => g.segs[0].P);
+  const polygon = offsetPolygon(centerPolygon, groups.map((g) => g.segs[0].thickness / 2));
+  const area = polygonArea(polygon);
+  if (area <= 0) return null;
+  const walls = buildFaces(groups, polygon, idx, openingsByWallId(d)).map((w) => ({ ...w, kind: 'room' }));
 
   const wallIds = [...new Set(edges.map((h) => h.wall.id))];
   return {
@@ -768,6 +800,22 @@ function roomGeometry(face, idx, wallInfo, d) {
     spurWallIds: spurs.map((w) => w.id),
     labelPoint: labelPoint(polygon),
   };
+}
+
+/**
+ * Exterior wall faces around an outer (negative-area) face of the graph. The
+ * outer face is traced with the outside on the perp(dir) side, so the same
+ * offset that insets a room pushes these faces out to the outside skin.
+ */
+function exteriorGeometry(face, idx, wallInfo, d) {
+  const { edges } = stripSpurs(face.halfEdges);
+  if (edges.length < 3) return [];
+  const groups = groupEdges(edges, idx, wallInfo);
+  if (!groups) return [];
+  const polygon = offsetPolygon(groups.map((g) => g.segs[0].P), groups.map((g) => g.segs[0].thickness / 2));
+  return buildFaces(groups, polygon, idx, openingsByWallId(d))
+    .filter((w) => w.length > EPS)
+    .map((w) => ({ ...w, kind: 'exterior', exterior: true }));
 }
 
 /** Pairs persisted room records with current faces: by wall set, then by anchor point. */
@@ -805,7 +853,7 @@ export function syncRooms(d) {
   for (const g of rooms) {
     let r = g.room;
     if (!r) {
-      r = { id: uid('r'), name: nextRoomName([...d.rooms, ...kept]), ceiling: defaultCeiling(), crown: false, flooring: true, bulkheads: [] };
+      r = { id: uid('r'), name: nextRoomName([...d.rooms, ...kept]), ceiling: defaultCeiling(), flooring: true, bulkheads: [] };
     }
     r.key = g.key;
     r.anchor = { x: g.labelPoint.x, y: g.labelPoint.y };
@@ -835,7 +883,7 @@ export function roomElevations(d, geom) {
     spec,
     model,
     bulkheads,
-    walls: geom.walls.map((w) => ({ ...w, profile: wallTopProfile(model, w.P, w.Q), bands: faceBands(w, bulkheads) })),
+    walls: geom.walls.map((w) => ({ ...w, profile: wallTopProfile(model, w.P, w.Q), bands: faceBands(w, bulkheads), tray: trayOverWall(model, w.P, w.Q) })),
   };
 }
 

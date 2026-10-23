@@ -27,7 +27,7 @@ export function field(label, control, hint) {
  * Text input that accepts any length notation and commits millimetres.
  * `value` may be null (shows placeholder, e.g. an inherited default).
  */
-export function lengthInput(value, units, onCommit, { placeholder, allowEmpty = false, min = 0, name } = {}) {
+export function lengthInput(value, units, onCommit, { placeholder, allowEmpty = false, min = 0, name, parse = parseLength, example } = {}) {
   const input = h('input', {
     type: 'text', class: 'length-input', value: value == null ? '' : formatLength(value, units),
     placeholder: placeholder ?? '', spellcheck: false, autocomplete: 'off', name,
@@ -39,10 +39,10 @@ export function lengthInput(value, units, onCommit, { placeholder, allowEmpty = 
       if (value != null) onCommit(null);
       return;
     }
-    const mm = parseLength(raw, units);
+    const mm = parse(raw, units);
     if (mm == null || mm < min) {
       input.classList.add('invalid');
-      input.title = units === 'metric' ? 'Try 2.4, 2400mm or 240cm' : `Try 8', 8' 6", 96" or 8 6`;
+      input.title = example ?? (units === 'metric' ? 'Try 2.4, 2400mm or 240cm' : `Try 8', 8' 6", 96" or 8 6`);
       return;
     }
     input.classList.remove('invalid');

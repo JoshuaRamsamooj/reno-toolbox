@@ -14,11 +14,10 @@ import { MM_PER_IN, formatArea, formatDeviation, formatLength, parseDeviation, p
 import { esc, n, pts, tag, uprightAngle } from './svg.js';
 import { renderHeatmap, renderLegend, renderSurvey } from './levelLayer.js';
 import { h } from './dom.js';
+import { DrawingCanvas } from './canvas.js';
+import { designFaces, faceAtPoint, faceKey, faceRef } from '../core/faces.js';
+import { planTrimBands } from '../core/trim.js';
 
-const IMPERIAL_STEPS = [0.5, 1, 3, 6, 12, 24, 60, 120, 240, 600, 1200].map((i) => i * MM_PER_IN);
-const IMPERIAL_MAJOR = [12, 60, 120, 600, 1200, 6000].map((i) => i * MM_PER_IN);
-const METRIC_STEPS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
-const METRIC_MAJOR = [1000, 5000, 10000, 50000, 100000];
 const ANGLE_SNAP = (10 * Math.PI) / 180;
 const TYPABLE = /^[0-9.'"\/\- xXmMcC]$/;
 const READING_TYPABLE = /^[0-9.+\-−\/"' mMcCiInN]$/;
@@ -31,6 +30,7 @@ export const TOOLS = {
   door: { label: 'Door', key: 'D', hint: 'Click on a wall to place a door · select it afterwards to flip the swing or change the size' },
   window: { label: 'Window', key: 'N', hint: 'Click on a wall to place a window · select it afterwards to set width, height and sill' },
   opening: { label: 'Opening', key: 'O', hint: 'Click on a wall to place a cased opening (no door)' },
+  trim: { label: 'Trim', key: 'T', hint: 'Hover the side of a wall and click to open that face in the trim editor · each side of a wall (and the outside of exterior walls) has its own trim' },
   level: { label: 'Level', key: 'L', hint: 'Click a room, then a grid node · tap a preset reading in the bar, or type any value + Enter · quick entry jumps to the next node · Tab skips, arrows move, Del clears, Esc stops' },
 };
 
@@ -38,7 +38,7 @@ export class PlanView {
   constructor(app, svg) {
     this.app = app;
     this.svg = svg;
-    this.view = { scale: 0.06, tx: 0, ty: 0 };
+    this.canvas = new DrawingCanvas({ svg, app, units: () => this.units, minScale: 0.004, maxScale: 2, scale: 0.06, onView: () => this.render(), fitLabel: 'Fit the plan (F)' });
     this.tool = 'select';
     this.draw = null;
     this.cursor = null;
@@ -59,6 +59,10 @@ export class PlanView {
     // Level tool entry bar (preset readings + custom value), docked over the canvas.
     this.palette = h('div', { class: 'lvl-palette', hidden: true });
     svg.parentElement.append(this.palette);
+    // Canvas bar (same controls as the wall face editor), above the drawing.
+    this.bar = h('div', { class: 'cv-bar' });
+    svg.parentElement.insertBefore(this.bar, svg);
+    this.renderBar();
     this.bindEvents();
     new ResizeObserver(() => this.render()).observe(svg);
   }
@@ -74,53 +78,60 @@ export class PlanView {
   // -------------------------------------------------------------------------
   // Coordinates, zoom, grid
 
+  get view() {
+    return this.canvas.view;
+  }
+
   toWorld(e) {
-    const r = this.svg.getBoundingClientRect();
-    return { x: (e.clientX - r.left - this.view.tx) / this.view.scale, y: (e.clientY - r.top - this.view.ty) / this.view.scale };
+    const p = this.canvas.toWorld(e);
+    return { x: p.x, y: p.y };
   }
 
   toScreen(p) {
-    return { x: p.x * this.view.scale + this.view.tx, y: p.y * this.view.scale + this.view.ty };
+    return { x: this.canvas.X(p.x), y: this.canvas.Y(p.y) };
   }
 
   px(v) {
-    return v / this.view.scale;
+    return this.canvas.px(v);
   }
 
   zoomAt(screen, factor) {
-    const s = Math.min(2, Math.max(0.004, this.view.scale * factor));
-    const k = s / this.view.scale;
-    this.view.tx = screen.x - (screen.x - this.view.tx) * k;
-    this.view.ty = screen.y - (screen.y - this.view.ty) * k;
-    this.view.scale = s;
-    this.render();
+    this.canvas.zoomAt(screen.x, screen.y, factor);
   }
 
   zoomBy(factor) {
-    const r = this.svg.getBoundingClientRect();
-    this.zoomAt({ x: r.width / 2, y: r.height / 2 }, factor);
+    this.canvas.zoomBy(factor);
   }
 
   fit() {
-    const r = this.svg.getBoundingClientRect();
     const b = designBounds(this.design) ?? { minX: 0, minY: 0, width: 12000, height: 9000 };
+    // At least 3 m × 3 m, centred on the plan.
     const w = Math.max(b.width, 3000);
-    const h = Math.max(b.height, 3000);
-    const s = Math.min((r.width - 160) / w, (r.height - 160) / h);
-    this.view.scale = Math.max(0.004, Math.min(0.5, s || 0.06));
-    this.view.tx = r.width / 2 - (b.minX + b.width / 2) * this.view.scale;
-    this.view.ty = r.height / 2 - (b.minY + b.height / 2) * this.view.scale;
+    const hgt = Math.max(b.height, 3000);
+    const cx = b.minX + b.width / 2;
+    const cy = b.minY + b.height / 2;
+    this.canvas.fitTo({ minX: cx - w / 2, maxX: cx + w / 2, minY: cy - hgt / 2, maxY: cy + hgt / 2 }, { left: 56, top: 56, right: 80, bottom: 80 }, 0.5);
     this.render();
   }
 
   gridSteps() {
-    const s = this.view.scale;
-    const steps = this.units === 'metric' ? METRIC_STEPS : IMPERIAL_STEPS;
-    const majors = this.units === 'metric' ? METRIC_MAJOR : IMPERIAL_MAJOR;
-    const snap = steps.find((v) => v * s >= 7) ?? steps[steps.length - 1];
-    const major = majors.find((v) => v * s >= 60) ?? majors[majors.length - 1];
-    const minor = steps.find((v) => v * s >= 14 && major % v < 1e-6) ?? major;
-    return { snap, minor, major };
+    return this.canvas.steps();
+  }
+
+  /** Grid step for snapping: the grid, or 1/16" / 1 mm with the grid or snapping off. */
+  snapStep() {
+    return this.canvas.snapOn ? this.canvas.snapStep() : this.canvas.fine;
+  }
+
+  /** The Snap / Grid / zoom / Fit bar, rebuilt when a toggle changes. */
+  renderBar() {
+    const key = `${this.canvas.snapOn}|${this.canvas.gridOn}`;
+    if (this.barKey === key) return;
+    this.barKey = key;
+    this.bar.replaceChildren(
+      h('span', { class: 'cv-title' }, 'Floor plan'),
+      h('span', { class: 'spacer' }),
+      this.canvas.controls({ onFit: () => this.fit() }));
   }
 
   // -------------------------------------------------------------------------
@@ -132,8 +143,13 @@ export class PlanView {
    * angle snapping; opts.excludeNodes skips nodes being dragged.
    */
   snap(raw, opts = {}) {
+    // Snapping off: only round to 1/16" / 1 mm (Shift still frees the angle).
+    if (!this.canvas.snapOn) {
+      const f = this.canvas.fine;
+      return { p: { x: Math.round(raw.x / f) * f, y: Math.round(raw.y / f) * f }, kind: 'free', guides: [] };
+    }
     const tol = this.px(10);
-    const { snap: step } = this.gridSteps();
+    const step = this.snapStep();
     const exclude = new Set(opts.excludeNodes ?? []);
     const extra = opts.extraPoints ?? [];
     const candidates = [...this.design.nodes.filter((nd) => !exclude.has(nd.id)), ...extra];
@@ -571,7 +587,7 @@ export class PlanView {
     const s = this.snap(raw, {});
     if (s.kind !== 'grid') return s;
     const t = this.design.settings.wallThickness;
-    const { snap: step } = this.gridSteps();
+    const step = this.snapStep();
     const fix = (axis) => {
       const delta = raw[axis] - start[axis];
       const sign = Math.sign(delta) || 1;
@@ -659,18 +675,11 @@ export class PlanView {
 
   bindEvents() {
     const svg = this.svg;
-    svg.addEventListener('contextmenu', (e) => e.preventDefault());
-    svg.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      const r = svg.getBoundingClientRect();
-      const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015));
-      this.zoomAt({ x: e.clientX - r.left, y: e.clientY - r.top }, factor);
-    }, { passive: false });
     svg.addEventListener('pointerdown', (e) => this.onPointerDown(e));
     svg.addEventListener('pointermove', (e) => this.onPointerMove(e));
     svg.addEventListener('pointerup', (e) => this.onPointerUp(e));
     svg.addEventListener('pointerleave', () => {
-      if (!this.drag) {
+      if (!this.drag && !this.canvas.pan) {
         this.cursor = null;
         this.render();
       }
@@ -681,9 +690,8 @@ export class PlanView {
   onPointerDown(e) {
     const raw = this.toWorld(e);
     this.svg.setPointerCapture(e.pointerId);
-    if (e.button === 1 || e.button === 2 || this.app.spaceDown || (e.button === 0 && this.tool === 'pan')) {
-      this.drag = { type: 'pan', sx: e.clientX, sy: e.clientY, tx: this.view.tx, ty: this.view.ty };
-      this.svg.classList.add('panning');
+    if (this.canvas.wantsPan(e, this.tool === 'pan')) {
+      this.canvas.startPan(e);
       return;
     }
     if (e.button !== 0) return;
@@ -747,6 +755,13 @@ export class PlanView {
       return;
     }
 
+    if (this.tool === 'trim') {
+      const face = faceAtPoint(designFaces(this.design), raw, this.px(16));
+      if (face) this.app.openFace(faceRef(face));
+      else this.flash('Click on the side of a wall');
+      return;
+    }
+
     // Select tool
     const hit = this.hitTest(raw);
     if (e.shiftKey && hit) {
@@ -801,13 +816,7 @@ export class PlanView {
   onPointerMove(e) {
     const raw = this.toWorld(e);
     const dr = this.drag;
-    if (dr?.type === 'pan') {
-      this.view.tx = dr.tx + e.clientX - dr.sx;
-      this.view.ty = dr.ty + e.clientY - dr.sy;
-      if (Math.hypot(e.clientX - dr.sx, e.clientY - dr.sy) > 3) dr.click = false;
-      this.render();
-      return;
-    }
+    if (this.canvas.movePan(e)) return;
     if (dr?.type === 'marquee') {
       if (Math.hypot(e.clientX - dr.sx, e.clientY - dr.sy) > 4) dr.moved = true;
       dr.end = raw;
@@ -837,6 +846,11 @@ export class PlanView {
     } else if (this.tool === 'pan') {
       this.hover = null;
       this.cursor = { p: raw };
+    } else if (this.tool === 'trim') {
+      this.hover = null;
+      const face = faceAtPoint(designFaces(this.design), raw, this.px(16));
+      this.hoverFace = face ? faceKey(faceRef(face)) : null;
+      this.cursor = { p: raw };
     } else if (this.tool === 'level') {
       const ctx = this.levelContext();
       this.hover = null;
@@ -862,7 +876,7 @@ export class PlanView {
       node.y = s.p.y;
       this.cursor = s;
     } else if (dr.type === 'wall') {
-      const { snap: step } = this.gridSteps();
+      const step = this.snapStep();
       let k = dot(sub(raw, dr.start), dr.normal);
       if (!e.shiftKey) k = Math.round(k / step) * step;
       for (const [id, o] of Object.entries(dr.orig)) {
@@ -874,10 +888,10 @@ export class PlanView {
     } else if (dr.type === 'opening') {
       const o = d.openings.find((x) => x.id === dr.id);
       const g = openingGeometry(d, o, idx);
-      const fine = d.units === 'metric' ? 10 : MM_PER_IN;
+      const fine = this.canvas.snapOn ? (d.units === 'metric' ? 10 : MM_PER_IN) : this.canvas.fine;
       let offset = dot(sub(raw, g.A), g.dir);
       if (!e.shiftKey) offset = Math.round(offset / fine) * fine;
-      if (Math.abs(offset - g.length / 2) < this.px(8)) offset = g.length / 2;
+      if (this.canvas.snapOn && Math.abs(offset - g.length / 2) < this.px(8)) offset = g.length / 2;
       // Slide up against neighbours rather than overlapping them.
       o.offset = freeOpeningOffset(d, o, offset, g.length) ?? o.offset;
     }
@@ -886,8 +900,8 @@ export class PlanView {
   onPointerUp(e) {
     const dr = this.drag;
     this.drag = null;
-    this.svg.classList.remove('panning');
     if (this.svg.hasPointerCapture(e.pointerId)) this.svg.releasePointerCapture(e.pointerId);
+    if (this.canvas.endPan()) return;
     if (dr?.type === 'marquee') {
       this.marqueeHits = null;
       if (!dr.moved) {
@@ -927,6 +941,10 @@ export class PlanView {
   /** Keyboard input routed from the app; returns true when consumed. */
   onKey(e) {
     if (this.tool === 'level' && this.onLevelKey(e)) return true;
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !this.typed && (e.key === 's' || e.key === 'g' || e.key === 'S' || e.key === 'G')) {
+      this.canvas.toggle(e.key.toLowerCase() === 's' ? 'snapOn' : 'gridOn');
+      return true;
+    }
     const drawing = (this.tool === 'wall' && this.draw) || (this.tool === 'rect' && this.draw);
     if (drawing && e.key.length === 1 && TYPABLE.test(e.key) && !e.ctrlKey && !e.metaKey) {
       this.typed += e.key;
@@ -997,9 +1015,9 @@ export class PlanView {
   }
 
   renderNow() {
-    const { scale: s, tx, ty } = this.view;
-    this.worldLayer.setAttribute('transform', `matrix(${s} 0 0 ${s} ${tx} ${ty})`);
-    this.gridLayer.innerHTML = this.renderGrid();
+    this.worldLayer.setAttribute('transform', this.canvas.worldTransform());
+    this.gridLayer.innerHTML = this.canvas.gridSvg();
+    this.renderBar();
     const analysis = analyze(this.design);
     const level = this.tool === 'level' ? this.renderLevel(analysis) : null;
     this.worldLayer.innerHTML = [
@@ -1007,13 +1025,15 @@ export class PlanView {
       level?.heat,
       this.renderWalls(analysis),
       this.renderOpenings(analysis),
+      this.renderFaceTrim(analysis),
       this.renderDimensions(analysis),
       level ? '' : this.renderRoomLabels(analysis),
       level?.survey,
       this.renderSelection(analysis),
       this.renderPreview(),
     ].join('');
-    this.overlayLayer.innerHTML = this.renderOverlay(level);
+    const cur = this.cursor?.p;
+    this.overlayLayer.innerHTML = this.renderOverlay(level) + this.canvas.rulersSvg({ cursor: cur && { x: cur.x, y: cur.y } });
     this.updatePalette(level);
   }
 
@@ -1042,31 +1062,6 @@ export class PlanView {
     }
     const entryNode = activeLa && this.levelEntry?.roomId === active.room.id ? activeLa.nodes.find((nd) => nd.key === this.levelEntry.key) : null;
     return { heat, survey, la: activeLa, entryNode, unit };
-  }
-
-  renderGrid() {
-    const r = this.svg.getBoundingClientRect();
-    const { minor, major } = this.gridSteps();
-    const s = this.view.scale;
-    const x0 = -this.view.tx / s;
-    const y0 = -this.view.ty / s;
-    const x1 = x0 + r.width / s;
-    const y1 = y0 + r.height / s;
-    const lines = [];
-    for (const [step, cls] of [[minor, 'minor'], [major, 'major']]) {
-      if (step === major && cls === 'minor') continue;
-      let d = '';
-      for (let x = Math.floor(x0 / step) * step; x <= x1; x += step) {
-        const sx = n(x * s + this.view.tx);
-        d += `M${sx} 0V${n(r.height)}`;
-      }
-      for (let y = Math.floor(y0 / step) * step; y <= y1; y += step) {
-        const sy = n(y * s + this.view.ty);
-        d += `M0 ${sy}H${n(r.width)}`;
-      }
-      lines.push(`<path class="grid-${cls}" d="${d}"/>`);
-    }
-    return lines.join('');
   }
 
   renderRooms(analysis) {
@@ -1203,6 +1198,55 @@ export class PlanView {
       out.push(`<g class="${cls}">${body}</g>`);
     }
     return out.join('');
+  }
+
+  /**
+   * Trim on the plan (unless turned off in the plan settings): baseboard as a
+   * solid band along the floor line, crown (and tray crown) as a dashed band
+   * at its projection, both mitred where they meet at corners, and casing
+   * legs, stools and sills around cased doors and windows. With the Trim
+   * tool, the face under the mouse is always highlighted and named.
+   */
+  renderFaceTrim(analysis) {
+    const trimTool = this.tool === 'trim';
+    const showTrim = this.design.settings.showTrim !== false && this.design.faceTrim.length > 0;
+    if (!trimTool && !showTrim) return '';
+    const faces = designFaces(this.design, analysis);
+    const out = [];
+    if (showTrim) {
+      // Real depth off the wall (¾" baseboard and casing, crown ≈ 70% of its width, stools and
+      // sills their width), but never thinner than a few pixels.
+      const stock = this.units === 'metric' ? 18 : 0.75 * MM_PER_IN;
+      const depth = (x) => {
+        if (x.category === 'crown') return Math.max(x.size * 0.7, this.px(7));
+        if (x.part === 'leg') return Math.max(stock, this.px(4.5));
+        if (x.part === 'stool' || x.part === 'sill') return Math.max(x.size, this.px(5));
+        return Math.max(stock, this.px(3.5));
+      };
+      const bands = planTrimBands(this.design, faces, depth);
+      // Crown first (it is overhead), then baseboard at the floor line, then casing, which the baseboard stops against.
+      const layer = (b) => (b.category === 'crown' ? 0 : b.part === 'run' ? 1 : 2);
+      for (const b of [...bands].sort((p, q) => layer(p) - layer(q))) {
+        const crown = b.category === 'crown';
+        const cls = crown ? 'crown' : b.part === 'run' ? 'baseboard' : b.part === 'leg' ? 'casing' : 'stool';
+        out.push(tag('polygon', {
+          class: `plan-trim ${cls}`, points: pts(b.poly), 'stroke-width': this.px(1),
+          'stroke-dasharray': crown ? `${n(this.px(4))} ${n(this.px(3))}` : undefined,
+        }, null));
+      }
+    }
+    if (trimTool) {
+      const f = faces.find((x) => this.hoverFace === faceKey(faceRef(x)));
+      if (f) {
+        const off = scale(f.outward, -this.px(4));
+        const a = add(f.P, off);
+        const b = add(f.Q, off);
+        out.push(tag('line', { class: 'face-line hover', x1: a.x, y1: a.y, x2: b.x, y2: b.y, 'stroke-width': this.px(5) }, null));
+        const mid = add(add(f.P, scale(sub(f.Q, f.P), 0.5)), scale(f.outward, -this.px(18)));
+        out.push(this.label(mid, `${f.name} – click to edit trim`, uprightAngle(f.dir), 'face-label', 11));
+      }
+    }
+    return `<g class="face-trim">${out.join('')}</g>`;
   }
 
   label(p, text, angle, cls, size) {
@@ -1404,14 +1448,13 @@ export class PlanView {
       }
       return out.join('');
     }
+    // Typed values sit by the cursor, messages in the banner, as on a wall face.
     const anchor = this.cursor?.p ?? this.draw?.points?.at(-1) ?? this.draw?.start;
-    if ((this.typed || this.message) && anchor) {
+    if (this.typed && anchor) {
       const s = this.toScreen(anchor);
-      const text = this.typed ? `${this.typed}▏` : this.message;
-      const w = Math.max(60, text.length * 7.4 + 20);
-      const cls = this.typed ? 'typed' : 'message';
-      out.push(`<g class="${cls}" transform="translate(${n(s.x + 18)} ${n(s.y + 18)})"><rect width="${n(w)}" height="24" rx="4"/><text x="10" y="16">${esc(text)}</text></g>`);
+      out.push(this.canvas.typedSvg(s.x, s.y, this.typed, this.tool === 'rect' ? 'interior W x D' : 'length'));
     }
+    out.push(this.canvas.messageSvg(this.message));
     return out.join('');
   }
 }

@@ -24,3 +24,18 @@ export function uprightAngle(dir) {
   if (a < -89.99) a += 180;
   return a;
 }
+
+/**
+ * Wainscot marks (from core/trim.js wainscotMarks) as SVG, mapped by X(s) and
+ * Y(z) at `scale` px/mm. Grooves are dropped once closer than 3 px.
+ */
+export function wainscotMarksSvg(marks, X, Y, scale) {
+  const byKind = new Map();
+  for (const l of marks.lines) {
+    if (l.kind === 'groove' && marks.spacing * scale < 3) continue;
+    byKind.set(l.kind, (byKind.get(l.kind) ?? '') + `M${n(X(l.s0))} ${n(Y(l.z0))}L${n(X(l.s1))} ${n(Y(l.z1))}`);
+  }
+  const strips = marks.strips.map((ring) => `M${ring.map((q) => `${n(X(q.s))} ${n(Y(q.z))}`).join('L')}Z`).join('');
+  return `<g class="fe-wmarks pat-${marks.pattern}">${strips ? `<path class="fe-wstrip" d="${strips}"/>` : ''}${
+    [...byKind].map(([kind, d]) => `<path class="fe-wline ${kind}" d="${d}"/>`).join('')}</g>`;
+}

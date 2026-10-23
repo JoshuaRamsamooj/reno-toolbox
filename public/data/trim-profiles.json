@@ -1,0 +1,39 @@
+{
+  "about": "Trim profile catalog. Add a profile by appending an entry: id (unique), name, category, widths (with units, e.g. \"3 1/4\\\"\" or \"70mm\"), unit (lf = linear feet/metres, sf = area, sheet = sheet count). Sheet goods also need sheetLength; their widths are the sheet widths. Optional: defaultWidth, default (true = preferred profile for its category), description, and for wall panelling a drawing pattern (beadboard, shiplap, board-batten or panel) with spacing (groove or batten spacing, with units).",
+  "categories": ["baseboard", "crown", "chair-rail", "panel-moulding", "door-casing", "window-casing", "window-stool", "window-apron", "window-sill"],
+  "profiles": [
+    { "id": "base-colonial", "name": "Colonial baseboard", "category": "baseboard", "widths": ["3 1/4\"", "4 1/4\"", "5 1/4\""], "defaultWidth": "5 1/4\"", "unit": "lf", "default": true },
+    { "id": "base-craftsman", "name": "Craftsman flat baseboard", "category": "baseboard", "widths": ["5 1/2\"", "7 1/4\""], "unit": "lf" },
+    { "id": "base-ogee", "name": "Ogee baseboard", "category": "baseboard", "widths": ["4 1/4\"", "5 1/4\"", "7 1/4\""], "unit": "lf" },
+    { "id": "base-square", "name": "Square-edge baseboard", "category": "baseboard", "widths": ["70mm", "90mm", "120mm", "145mm"], "defaultWidth": "90mm", "unit": "lf" },
+
+    { "id": "crown-cove", "name": "Cove crown", "category": "crown", "widths": ["3 5/8\"", "4 5/8\""], "unit": "lf", "default": true },
+    { "id": "crown-colonial", "name": "Colonial crown", "category": "crown", "widths": ["3 5/8\"", "5 1/4\"", "7 1/4\""], "unit": "lf" },
+    { "id": "crown-cornice", "name": "Cornice", "category": "crown", "widths": ["90mm", "120mm", "150mm"], "unit": "lf" },
+
+    { "id": "chair-colonial", "name": "Colonial chair rail", "category": "chair-rail", "widths": ["2 1/2\"", "3\""], "unit": "lf", "default": true },
+    { "id": "chair-flat-cap", "name": "Flat cap chair rail", "category": "chair-rail", "widths": ["2 1/2\"", "3 1/2\""], "unit": "lf" },
+    { "id": "dado-rail", "name": "Dado rail", "category": "chair-rail", "widths": ["58mm", "69mm"], "unit": "lf" },
+
+    { "id": "panel-bead", "name": "Panel moulding (picture frame)", "category": "panel-moulding", "widths": ["11/16\"", "1 1/8\"", "1 5/8\""], "defaultWidth": "1 1/8\"", "unit": "lf", "default": true },
+    { "id": "panel-bolection", "name": "Bolection panel moulding", "category": "panel-moulding", "widths": ["1 3/4\"", "2 1/4\""], "unit": "lf" },
+    { "id": "wainscot-beadboard-sheet", "name": "Beadboard wainscot panel", "category": "panel-moulding", "widths": ["4'", "2'"], "sheetLength": "8'", "unit": "sheet", "pattern": "beadboard", "spacing": "1 5/8\"" },
+    { "id": "wainscot-mdf-sheet", "name": "MDF wainscot sheet", "category": "panel-moulding", "widths": ["1200mm"], "sheetLength": "2400mm", "unit": "sheet", "pattern": "panel" },
+    { "id": "wainscot-shiplap", "name": "Shiplap boards", "category": "panel-moulding", "widths": ["5 1/2\"", "7 1/4\""], "unit": "sf", "pattern": "shiplap" },
+    { "id": "wainscot-board-batten", "name": "Board and batten", "category": "panel-moulding", "widths": ["2 1/2\"", "3 1/2\""], "unit": "sf", "pattern": "board-batten", "spacing": "16\"" },
+
+    { "id": "casing-colonial", "name": "Colonial casing", "category": "door-casing", "widths": ["2 1/4\"", "2 1/2\"", "3 1/2\""], "defaultWidth": "3 1/2\"", "unit": "lf", "default": true },
+    { "id": "casing-craftsman", "name": "Craftsman flat casing", "category": "door-casing", "widths": ["3 1/2\"", "4 1/2\""], "unit": "lf" },
+    { "id": "casing-brickmould", "name": "Brickmould (exterior)", "category": "door-casing", "widths": ["2\""], "unit": "lf" },
+    { "id": "architrave-bullnose", "name": "Bullnose architrave", "category": "door-casing", "widths": ["66mm", "90mm"], "unit": "lf" },
+
+    { "id": "wcasing-colonial", "name": "Colonial window casing", "category": "window-casing", "widths": ["2 1/4\"", "2 1/2\"", "3 1/2\""], "defaultWidth": "3 1/2\"", "unit": "lf", "default": true },
+    { "id": "wcasing-craftsman", "name": "Craftsman flat window casing", "category": "window-casing", "widths": ["3 1/2\"", "4 1/2\""], "unit": "lf" },
+    { "id": "wcasing-brickmould", "name": "Brickmould window trim (exterior)", "category": "window-casing", "widths": ["2\""], "unit": "lf" },
+
+    { "id": "stool-standard", "name": "Window stool", "category": "window-stool", "widths": ["2 3/4\"", "3 1/2\"", "4 1/2\""], "defaultWidth": "3 1/2\"", "unit": "lf", "default": true },
+    { "id": "apron-colonial", "name": "Colonial apron", "category": "window-apron", "widths": ["2 1/4\"", "3 1/2\""], "defaultWidth": "3 1/2\"", "unit": "lf", "default": true },
+    { "id": "sill-nosing", "name": "Sill nosing", "category": "window-sill", "widths": ["1 1/4\"", "2\""], "unit": "lf", "default": true },
+    { "id": "sill-exterior", "name": "Exterior sill", "category": "window-sill", "widths": ["5 1/2\"", "7 1/4\""], "unit": "lf" }
+  ]
+}
