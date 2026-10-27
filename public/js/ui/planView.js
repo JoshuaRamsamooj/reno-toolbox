@@ -4,8 +4,8 @@ import {
   add, closestPointOnSegment, dist, dot, lineIntersection, norm, perp, scale, segmentIntersection, sub,
 } from '../core/geometry.js';
 import {
-  addOpening, addRectangle, addWallChain, analyze, designBounds, findNodeNear, freeOpeningOffset, newOpeningPlacement,
-  indexDesign, nodeDegrees, openingGeometry, rectangleCorners, resolveRoomCeiling, translateNodes,
+  BARN_OVERLAP, addOpening, addRectangle, addWallChain, analyze, designBounds, doorStyle, findNodeNear, freeOpeningOffset, newOpeningPlacement,
+  facesOfWall, indexDesign, nodeDegrees, openingGeometry, rectangleCorners, resolveRoomCeiling, translateNodes, uid, wallFaceSpans,
 } from '../core/model.js';
 import { ceilingModel } from '../core/ceiling.js';
 import { resolveBulkheads } from '../core/bulkhead.js';
@@ -13,23 +13,32 @@ import { MAX_READING, READING_PRESETS, analyzeLeveling, connectedRooms, readingU
 import { MM_PER_IN, formatArea, formatDeviation, formatLength, parseDeviation, parseDimensions, parseLength, unitDefaults } from '../core/units.js';
 import { esc, n, pts, tag, uprightAngle } from './svg.js';
 import { renderHeatmap, renderLegend, renderSurvey } from './levelLayer.js';
-import { h } from './dom.js';
+import { layoutRun, resolveRun, runAtPoint, runLayer, snapOrigin } from '../core/flooring.js';
+import { renderFloorLegend, renderFloorMarks, renderFloorRun } from './floorLayer.js';
+import { checkbox, h } from './dom.js';
 import { DrawingCanvas } from './canvas.js';
-import { designFaces, faceAtPoint, faceKey, faceRef } from '../core/faces.js';
+import { RulerGuides } from './guides.js';
+import { designFaces, faceAtPoint, faceKey, faceRef, faceRuns } from '../core/faces.js';
 import { planTrimBands } from '../core/trim.js';
+import {
+  FURNITURE, alignPlacement, analyzeLayout, createFurniture, duplicateFurniture, footprint, resolveItem, toLocal, toWorld, wallPlacement, wrapAngle,
+} from '../core/furniture.js';
+import { applianceTag, furnitureGroup } from './layoutLayer.js';
 
 const ANGLE_SNAP = (10 * Math.PI) / 180;
 const TYPABLE = /^[0-9.'"\/\- xXmMcC]$/;
 const READING_TYPABLE = /^[0-9.+\-−\/"' mMcCiInN]$/;
 
 export const TOOLS = {
-  select: { label: 'Select', key: 'V', hint: 'Click to select, Shift+click to add · drag a box to select several (→ fully inside, ← touching) · drag corners, walls or openings to move · Del deletes · right-drag or Space+drag pans' },
+  select: { label: 'Select', key: 'V', hint: 'Click to select, Shift+click to add · drag a box to select several (→ fully inside, ← touching; guides it crosses) · drag corners, walls, openings or guides to move (drag any selected wall to move the whole selection; Shift locks the move horizontal or vertical, Alt moves without snapping) · drag from a ruler for a guide, Shift+drag a guide to pull a second one off it (type a distance + Enter) · Del deletes · right-drag or Space+drag pans' },
   pan: { label: 'Pan', key: 'P', hint: 'Drag to move around the plan · scroll to zoom · Space+drag or right-drag also pans with any tool' },
   wall: { label: 'Wall', key: 'W', hint: 'Click to start, click to add corners · type a length + Enter for exact walls · Shift = free angle · Enter/Esc/double-click to finish' },
   rect: { label: 'Room', key: 'R', hint: 'Drag (or click two corners) to add a rectangular room · type interior size like 12x10 + Enter' },
-  door: { label: 'Door', key: 'D', hint: 'Click on a wall to place a door · select it afterwards to flip the swing or change the size' },
+  door: { label: 'Door', key: 'D', hint: 'Click on a wall to place a door (in the last style you picked) · select it afterwards to set the style (single, double, sliding, pocket, barn), flip it or change the size' },
   window: { label: 'Window', key: 'N', hint: 'Click on a wall to place a window · select it afterwards to set width, height and sill' },
   opening: { label: 'Opening', key: 'O', hint: 'Click on a wall to place a cased opening (no door)' },
+  layout: { label: 'Layout', key: 'U', hint: 'Pick furniture, cabinets, fixtures or appliances in the panel, then click to place (Shift+click to place another) · wall pieces turn to face the room and sit flush on the nearest wall, sliding to corners, jambs and their neighbours · Q / E rotate 90° (Shift 15°) · drag to move (Shift locks the axis, Alt = no snapping) · Ctrl+D duplicates beside · arrows nudge · Esc stops placing' },
+  measure: { label: 'Measure', key: 'M', hint: 'Hover the side of a wall for its length, click to pin it · drag (or click, click) between two points, snapping to corners, wall faces and jambs · Shift = free angle · Del removes the last · Esc clears' },
   trim: { label: 'Trim', key: 'T', hint: 'Hover the side of a wall and click to open that face in the trim editor · each side of a wall (and the outside of exterior walls) has its own trim' },
   level: { label: 'Level', key: 'L', hint: 'Click a room, then a grid node · tap a preset reading in the bar, or type any value + Enter · quick entry jumps to the next node · Tab skips, arrows move, Del clears, Esc stops' },
 };
@@ -52,6 +61,26 @@ export class PlanView {
     this.levelNumbers = true;
     this.levelQuick = true;
     this.levelPreview = null;
+    // Flooring layer: shown or not, which layer (finish floor or subfloor) is drawn and
+    // edited, the run picked in the panel when no room is selected, and drag snap targets.
+    this.showFlooring = false;
+    this.floorLayer = 'finish';
+    this.floorRunId = null;
+    this.floorSnap = null;
+    // Measure tool: pinned measurements ({a, b} or a wall face), the one being drawn, and the face under the mouse.
+    this.measures = [];
+    this.measuring = null;
+    this.measureHover = null;
+    // Style for new doors: the last one picked in the inspector.
+    this.newDoorStyle = 'single';
+    // Layout planning: furniture shown or not, clearance zones ('selected' or 'all'), the item
+    // being placed ({ type, size, angle, ghost }) and the catalog's search and open sections.
+    this.showFurniture = true;
+    this.showClearances = 'all';
+    this.placing = null;
+    this.layoutSearch = '';
+    this.layoutOpen = new Set(['bedroom']);
+    this.rulers = this.rulerGuides();
     this.svg.innerHTML = '<g class="grid"></g><g class="world"></g><g class="overlay"></g>';
     this.gridLayer = svg.querySelector('.grid');
     this.worldLayer = svg.querySelector('.world');
@@ -125,11 +154,18 @@ export class PlanView {
 
   /** The Snap / Grid / zoom / Fit bar, rebuilt when a toggle changes. */
   renderBar() {
-    const key = `${this.canvas.snapOn}|${this.canvas.gridOn}`;
+    const key = `${this.canvas.snapOn}|${this.canvas.gridOn}|${this.showFlooring}|${this.showFurniture}`;
     if (this.barKey === key) return;
     this.barKey = key;
     this.bar.replaceChildren(
       h('span', { class: 'cv-title' }, 'Floor plan'),
+      h('span', { class: 'cv-layer', title: 'Show the flooring layout; drag it on the plan to move the pattern' },
+        checkbox('Flooring (Shift+F)', this.showFlooring, (v) => this.setFlooring(v))),
+      h('span', { class: 'cv-layer', title: 'Show furniture, cabinets, fixtures and appliances (always shown with the Layout tool)' },
+        checkbox('Furniture', this.showFurniture, (v) => {
+          this.showFurniture = v;
+          this.render();
+        })),
       h('span', { class: 'spacer' }),
       this.canvas.controls({ onFit: () => this.fit() }));
   }
@@ -140,7 +176,9 @@ export class PlanView {
   /**
    * Snaps a raw world point. opts.from enables angle snapping (45° steps)
    * and length inference relative to the previous point; opts.free disables
-   * angle snapping; opts.excludeNodes skips nodes being dragged.
+   * angle snapping; opts.excludeNodes skips nodes being dragged. Ruler guides
+   * snap like corners where they cross (each other or a wall) and like
+   * alignment lines elsewhere.
    */
   snap(raw, opts = {}) {
     // Snapping off: only round to 1/16" / 1 mm (Shift still frees the angle).
@@ -167,6 +205,17 @@ export class PlanView {
     if (bestNode) return { p: { x: bestNode.x, y: bestNode.y }, kind: 'node', nodeId: bestNode.id, guides: [] };
 
     const walls = this.design.walls.filter((w) => !exclude.has(w.a) && !exclude.has(w.b));
+    const rulerGuides = this.design.guides ?? [];
+    let bestCross = null;
+    bestD = tol;
+    for (const q of this.guidePoints(walls, idx)) {
+      const d = dist(q, raw);
+      if (d < bestD) {
+        bestCross = q;
+        bestD = d;
+      }
+    }
+    if (bestCross) return { p: bestCross, kind: 'guide', guides: [] };
 
     if (opts.from && !opts.free) {
       const v = sub(raw, opts.from);
@@ -190,6 +239,15 @@ export class PlanView {
             }
           }
         }
+        for (const g of rulerGuides) {
+          if (Math.abs(dir[g.axis]) < 1e-9) continue;
+          const t = (g.v - opts.from[g.axis]) / dir[g.axis];
+          const delta = Math.abs(t - along);
+          if (t > 0 && delta < bestDelta) {
+            bestDelta = delta;
+            best = { t, onGuide: true };
+          }
+        }
         for (const w of walls) {
           const A = idx.nodes.get(w.a);
           const B = idx.nodes.get(w.b);
@@ -204,7 +262,7 @@ export class PlanView {
         if (best) {
           const p = add(opts.from, scale(dir, best.t));
           const guides = best.guide ? [{ a: best.guide.from, b: p }] : [];
-          return { p, kind: best.wall ? 'wall' : 'aligned', guides, dir };
+          return { p, kind: best.wall ? 'wall' : best.onGuide ? 'guide' : 'aligned', guides, dir };
         }
         const t = Math.max(step, Math.round(along / step) * step);
         return { p: add(opts.from, scale(dir, t)), kind: 'angle', guides: [], dir };
@@ -235,13 +293,40 @@ export class PlanView {
           bestAxis = nd;
         }
       }
-      if (bestAxis) {
+      let onGuide = null;
+      for (const g of rulerGuides) {
+        const d = Math.abs(g.v - raw[axis]);
+        if (g.axis === axis && d < bestAxisD) {
+          bestAxisD = d;
+          onGuide = g;
+        }
+      }
+      if (onGuide) {
+        p[axis] = onGuide.v;
+        kind = 'guide';
+      } else if (bestAxis) {
         p[axis] = bestAxis[axis];
         guides.push({ a: bestAxis, b: p });
-        kind = 'aligned';
+        if (kind === 'grid') kind = 'aligned';
       }
     }
     return { p, kind, guides };
+  }
+
+  /** Where ruler guides cross each other or a wall centreline. */
+  guidePoints(walls, idx = indexDesign(this.design)) {
+    const out = this.rulers.crossings();
+    for (const g of this.design.guides) {
+      for (const w of walls) {
+        const A = idx.nodes.get(w.a);
+        const B = idx.nodes.get(w.b);
+        const a = A[g.axis];
+        const b = B[g.axis];
+        if (Math.abs(b - a) < 1e-9 || (a - g.v) * (b - g.v) > 0) continue;
+        out.push(add(A, scale(sub(B, A), (g.v - a) / (b - a))));
+      }
+    }
+    return out;
   }
 
   // -------------------------------------------------------------------------
@@ -254,12 +339,245 @@ export class PlanView {
     this.typed = '';
     this.message = '';
     this.levelEntry = null;
+    this.measures = [];
+    this.measuring = null;
+    this.measureHover = null;
+    this.rulers.cancel();
+    if (tool !== 'layout') this.placing = null;
     this.svg.dataset.tool = tool;
+    this.svg.classList.remove('floor-grab');
     if (tool === 'level' && this.app.selection?.type !== 'room') {
       const g = this.levelRoom(analyze(this.design), true);
       if (g?.room) this.app.select({ type: 'room', id: g.room.id });
     }
     this.app.emit('tool', tool);
+    this.render();
+  }
+
+  // -------------------------------------------------------------------------
+  // Flooring layout
+
+  setFlooring(on) {
+    this.showFlooring = on;
+    this.floorSnap = null;
+    this.svg.classList.toggle('flooring-on', on);
+    if (on && this.tool === 'level') this.setTool('select');
+    this.render();
+    this.app.inspector.render();
+  }
+
+  /** Layout of a run, memoised on the plan geometry and the run (the plan re-renders on every mouse move). */
+  floorLayout(run, analysis) {
+    const d = this.design;
+    const key = JSON.stringify([d.nodes, d.walls, d.openings, d.rooms.map((r) => [r.id, r.name]), d.units, d.settings.joists, run]);
+    this.floorCache ??= new Map();
+    const hit = this.floorCache.get(run.id);
+    if (hit?.key === key) return hit.layout;
+    const layout = layoutRun(d, run, { analysis });
+    this.floorCache.set(run.id, { key, layout });
+    if (this.floorCache.size > 40) this.floorCache.delete(this.floorCache.keys().next().value);
+    return layout;
+  }
+
+  /**
+   * The run being edited on the current layer: the selected room's, else the
+   * one picked in the panel, else the first. Null when the selected room has none.
+   */
+  activeFloorRun() {
+    const runs = this.design.floorRuns.filter((r) => runLayer(r) === this.floorLayer);
+    const sel = this.app.selection;
+    if (sel?.type === 'room') return runs.find((r) => r.roomIds.includes(sel.id)) ?? null;
+    return runs.find((r) => r.id === this.floorRunId) ?? runs[0] ?? null;
+  }
+
+  /** Re-renders the inspector once per frame while a layout is dragged (live takeoff). */
+  scheduleInspector() {
+    if (this.inspectorRaf) return;
+    this.inspectorRaf = requestAnimationFrame(() => {
+      this.inspectorRaf = null;
+      this.app.inspector.render();
+    });
+  }
+
+  /** Arrow keys move the active run's pattern by 1/8" or 1 mm (Shift: 1" or 10 mm). */
+  nudgeFloor(e) {
+    const run = this.activeFloorRun();
+    if (!run) return false;
+    const metric = this.units === 'metric';
+    const step = e.shiftKey ? (metric ? 10 : MM_PER_IN) : (metric ? 1 : MM_PER_IN / 8);
+    const dx = { ArrowLeft: -1, ArrowRight: 1 }[e.key] ?? 0;
+    const dy = { ArrowUp: -1, ArrowDown: 1 }[e.key] ?? 0;
+    this.app.change('Nudge flooring', (d) => {
+      const r = d.floorRuns.find((x) => x.id === run.id);
+      const o = resolveRun(r, d.units).origin;
+      r.origin = { x: o.x + dx * step, y: o.y + dy * step };
+    });
+    return true;
+  }
+
+  /**
+   * Layout layers for the current flooring layer: every run's pieces, its
+   * doorway strips (drawn over the walls, with those openings' cuts left
+   * open), and marks for the active run.
+   */
+  renderFlooring(analysis) {
+    const active = this.activeFloorRun();
+    let under = '';
+    let doorways = '';
+    let marks = '';
+    let layout = null;
+    const openings = new Set();
+    for (const run of this.design.floorRuns) {
+      if (runLayer(run) !== this.floorLayer) continue;
+      const la = this.floorLayout(run, analysis);
+      under += renderFloorRun(this, la, { active: run === active });
+      doorways += renderFloorRun(this, la, { active: run === active, thresholds: true });
+      for (const p of la.region.parts) if (p.kind === 'threshold') openings.add(p.opening.id);
+      if (run === active) {
+        layout = la;
+        marks = renderFloorMarks(this, la, { snap: this.floorSnap });
+      }
+    }
+    return { under, doorways, marks, layout, openings };
+  }
+
+  // -------------------------------------------------------------------------
+  // Ruler guides (guides.js does the work; the plan keeps them in design.guides)
+
+  /** What a plan guide on `axis` snaps to: wall faces parallel to it (also references for typed distances), then wall centrelines through corners. */
+  guideTargets(axis, exceptId = null) {
+    const analysis = analyze(this.design);
+    const targets = [];
+    for (const g of analysis.rooms) {
+      for (const f of g.walls) if (Math.abs(f.dir[axis]) < 1e-6) targets.push({ v: f.P[axis], label: g.dead ? 'dead space face' : 'interior face', ref: true });
+    }
+    for (const f of analysis.exteriorFaces) if (Math.abs(f.dir[axis]) < 1e-6) targets.push({ v: f.P[axis], label: 'exterior face', ref: true });
+    for (const nd of this.design.nodes) targets.push({ v: nd[axis], label: 'wall centreline' });
+    return targets;
+  }
+
+  rulerGuides() {
+    const plan = this;
+    return new RulerGuides(this.canvas, {
+      list: () => this.design.guides,
+      save: (label, fn) => this.app.change(label, (d) => fn(d.guides)),
+      targets: (axis, id) => this.guideTargets(axis, id),
+      parse: (text) => parseLength(text, this.units),
+      get example() { return plan.units === 'metric' ? '450mm or 1.2' : '18" or 3\'6"'; },
+      canGrab: () => this.tool === 'select',
+      isSelected: (id) => this.isActive('guide', id),
+      select: (id, additive) => (additive ? this.app.toggleSelect({ type: 'guide', id }) : this.app.select({ type: 'guide', id })),
+      render: () => this.render(),
+      flash: (msg) => this.flash(msg),
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Measure tool
+
+  /** Wall faces to measure: every room's (dead space too) and the outside of the building. */
+  measureFaces(analysis) {
+    return [
+      ...analysis.rooms.flatMap((g) => g.walls.map((f) => ({ ...f, where: `${g.dead ? 'Dead space' : g.room?.name ?? 'Room'} – ${f.compass} wall` }))),
+      ...analysis.exteriorFaces.map((f) => ({ ...f, where: `Exterior – ${f.compass} face` })),
+    ];
+  }
+
+  /**
+   * Snaps a measuring point: face corners, door and window jambs and guide
+   * crossings first; from a first point, 45° directions that stop on the
+   * wall face they reach (so a measure across a room gives its clear size);
+   * else the nearest face line or guide. Shift frees the angle.
+   */
+  measureSnap(raw, from = null, free = false) {
+    const fine = this.canvas.fine;
+    const round = (p) => ({ x: Math.round(p.x / fine) * fine, y: Math.round(p.y / fine) * fine });
+    if (!this.canvas.snapOn) return { p: round(raw), kind: 'free' };
+    const tol = this.px(10);
+    const analysis = analyze(this.design);
+    const faces = this.measureFaces(analysis);
+    const guides = this.design.guides;
+    const points = [];
+    for (const f of faces) {
+      points.push({ p: f.P, kind: 'node' }, { p: f.Q, kind: 'node' });
+      for (const op of f.openings) for (const s of [op.s0, op.s1]) if (s > 0 && s < f.length) points.push({ p: add(f.P, scale(f.dir, s)), kind: 'node' });
+    }
+    for (const q of this.guidePoints(this.design.walls, analysis.idx)) points.push({ p: q, kind: 'guide' });
+    let best = null;
+    let bestD = tol;
+    for (const c of points) {
+      const d = dist(c.p, raw);
+      if (d < bestD) {
+        best = c;
+        bestD = d;
+      }
+    }
+    if (best) return { p: { x: best.p.x, y: best.p.y }, kind: best.kind };
+
+    if (from && !free) {
+      const v = sub(raw, from);
+      const ang = Math.atan2(v.y, v.x);
+      const snapped = Math.round(ang / (Math.PI / 4)) * (Math.PI / 4);
+      if (Math.abs(ang - snapped) < ANGLE_SNAP && Math.hypot(v.x, v.y) > tol) {
+        const dir = { x: Math.round(Math.cos(snapped) * 1e9) / 1e9, y: Math.round(Math.sin(snapped) * 1e9) / 1e9 };
+        const along = dot(v, dir);
+        let hit = null;
+        let bestDelta = tol;
+        for (const f of faces) {
+          const x = segmentIntersection(from, add(from, dir), f.P, f.Q);
+          if (!x || x.t <= 0.5 || x.u < -1e-6 || x.u > 1 + 1e-6) continue;
+          if (Math.abs(x.t - along) < bestDelta) {
+            bestDelta = Math.abs(x.t - along);
+            hit = { t: x.t, kind: 'wall' };
+          }
+        }
+        for (const g of guides) {
+          if (Math.abs(dir[g.axis]) < 1e-9) continue;
+          const t = (g.v - from[g.axis]) / dir[g.axis];
+          if (t > 0.5 && Math.abs(t - along) < bestDelta) {
+            bestDelta = Math.abs(t - along);
+            hit = { t, kind: 'guide' };
+          }
+        }
+        return { p: add(from, scale(dir, hit ? hit.t : Math.round(along / fine) * fine)), kind: hit?.kind ?? 'angle' };
+      }
+    }
+    let onLine = null;
+    bestD = tol;
+    for (const f of faces) {
+      const c = closestPointOnSegment(raw, f.P, f.Q);
+      if (c.dist < bestD) {
+        bestD = c.dist;
+        onLine = { p: c.point, kind: 'wall' };
+      }
+    }
+    for (const g of guides) {
+      const d = Math.abs(raw[g.axis] - g.v);
+      if (d < bestD) {
+        bestD = d;
+        onLine = { p: { ...raw, [g.axis]: g.v }, kind: 'guide' };
+      }
+    }
+    return onLine ?? { p: round(raw), kind: 'free' };
+  }
+
+  /** A pinned wall face measurement: its corners, the room side to draw on, and what it is. */
+  faceMeasure(f) {
+    return { kind: 'face', a: f.P, b: f.Q, side: perp(f.dir), exterior: f.kind === 'exterior', where: f.where };
+  }
+
+  addMeasure(m) {
+    const last = this.measures.at(-1);
+    const repeat = last && last.kind === m.kind && dist(last.a, m.a) < 0.5 && dist(last.b, m.b) < 0.5;
+    if (dist(m.a, m.b) > 1 && !repeat) this.measures.push(m);
+    this.measuring = null;
+    this.app.inspector.render();
+    this.render();
+  }
+
+  removeMeasure(i) {
+    this.measures.splice(i, 1);
+    this.app.inspector.render();
     this.render();
   }
 
@@ -281,8 +599,8 @@ export class PlanView {
       const o = d.openings.find((x) => x.id === sel.id);
       g = o && analysis.rooms.find((x) => x.wallIds.includes(o.wallId));
     }
-    if (!g && fallback) g = analysis.rooms.find((x) => x.room?.leveling?.readings?.length) ?? analysis.rooms[0];
-    return g?.room ? g : null;
+    if (!g && fallback) g = analysis.rooms.find((x) => x.room?.leveling?.readings?.length && !x.dead) ?? analysis.rooms.find((x) => !x.dead);
+    return g?.room && !g.dead ? g : null; // dead space is never surveyed
   }
 
   /**
@@ -625,9 +943,9 @@ export class PlanView {
   }
 
   /**
-   * Walls and openings inside a selection box. Dragging left→right selects
-   * items fully inside ("window"); right→left selects anything touched
-   * ("crossing").
+   * Walls, openings and guides inside a selection box. Dragging left→right
+   * selects items fully inside ("window"); right→left selects anything
+   * touched ("crossing").
    */
   itemsInBox(a, b) {
     const box = { minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x), minY: Math.min(a.y, b.y), maxY: Math.max(a.y, b.y) };
@@ -641,6 +959,17 @@ export class PlanView {
       const g = openingGeometry(d, o, idx);
       if (g && test(g.start, g.end)) items.push({ type: 'opening', id: o.id });
     }
+    if (this.furnitureVisible()) {
+      for (const f of d.furniture) {
+        const outline = footprint(resolveItem(f)).outline;
+        const hit = crossing
+          ? outline.some((p, i) => segmentTouchesBox(p, outline[(i + 1) % outline.length], box)) || pointInPoly({ x: box.minX, y: box.minY }, outline)
+          : outline.every((p) => inBox(p, box));
+        if (hit) items.push({ type: 'furniture', id: f.id });
+      }
+    }
+    // Guides are endless lines, so in either direction a box picks the ones it crosses.
+    for (const id of this.rulers.inBox(box)) items.push({ type: 'guide', id });
     return items;
   }
 
@@ -653,6 +982,9 @@ export class PlanView {
     const d = this.design;
     const idx = indexDesign(d);
     const tol = this.px(6);
+    // The Layout tool picks furniture first; otherwise walls and openings win where they overlap it.
+    const furniture = this.furnitureVisible() ? this.furnitureAt(p) : null;
+    if (furniture && this.tool === 'layout') return furniture;
     for (const o of d.openings) {
       const g = openingGeometry(d, o, idx);
       if (g && closestPointOnSegment(p, g.start, g.end).dist < g.wall.thickness / 2 + tol) return { type: 'opening', id: o.id };
@@ -662,6 +994,7 @@ export class PlanView {
       const c = closestPointOnSegment(p, idx.nodes.get(w.a), idx.nodes.get(w.b));
       if (c.dist < w.thickness / 2 + tol) return { type: 'wall', id: w.id };
     }
+    if (furniture) return furniture;
     const analysis = analyze(d);
     const room = analysis.rooms
       .filter((g) => g.room && pointInPoly(p, g.polygon))
@@ -688,8 +1021,10 @@ export class PlanView {
   }
 
   onPointerDown(e) {
-    const raw = this.toWorld(e);
+    const scr = this.canvas.toWorld(e);
+    const raw = { x: scr.x, y: scr.y };
     this.svg.setPointerCapture(e.pointerId);
+    if (this.rulers.pointerDown(e, scr)) return;
     if (this.canvas.wantsPan(e, this.tool === 'pan')) {
       this.canvas.startPan(e);
       return;
@@ -749,7 +1084,8 @@ export class PlanView {
       const type = this.tool;
       let created = null;
       this.app.change(`Add ${type}`, (d) => {
-        created = addOpening(d, target.wallId, type, target.offset, { width: target.width, sill: target.sill, height: target.height });
+        const style = type === 'door' ? { style: this.newDoorStyle } : {};
+        created = addOpening(d, target.wallId, type, target.offset, { width: target.width, sill: target.sill, height: target.height, ...style });
       });
       if (created) this.app.select({ type: 'opening', id: created.id });
       return;
@@ -762,34 +1098,281 @@ export class PlanView {
       return;
     }
 
-    // Select tool
+    if (this.tool === 'measure') {
+      const s = this.measureSnap(raw, this.measuring?.a, e.shiftKey);
+      if (this.measuring) {
+        // Second click of a click, click measure.
+        this.addMeasure({ kind: 'line', a: this.measuring.a, b: s.p });
+        return;
+      }
+      const face = faceAtPoint(this.measureFaces(analyze(this.design)), raw, this.px(16));
+      this.measuring = { a: s.p, b: s.p, face, sx: e.clientX, sy: e.clientY, pressed: true, moved: false };
+      this.measureHover = null;
+      this.cursor = s;
+      this.render();
+      return;
+    }
+
+    if (this.tool === 'layout' && this.placing) {
+      // Click places the item where its preview is; Shift+click places it and keeps placing.
+      this.updateGhost(raw, e);
+      const ghost = this.placing.ghost;
+      let created = null;
+      this.app.change(`Add ${FURNITURE[ghost.type].name.toLowerCase()}`, (d) => {
+        created = { ...structuredClone(ghost), id: uid('u') };
+        d.furniture.push(created);
+      });
+      if (!e.shiftKey) {
+        this.placing = null;
+        if (created) this.app.select({ type: 'furniture', id: created.id });
+      }
+      this.app.inspector.render();
+      this.render();
+      return;
+    }
+
+    // Select tool (and the Layout tool between placements)
     const hit = this.hitTest(raw);
-    if (e.shiftKey && hit) {
+    // Over empty floor or a room, a guide under the mouse wins (Shift+drag pulls a copy off it).
+    if ((!hit || hit.type === 'room') && this.rulers.grab(e, scr)) return;
+    // Shift+click adds or removes. Shift held from the press on a selected wall or corner locks its
+    // move instead; letting go without moving still removes it from the selection.
+    const movable = !!hit && (hit.type === 'wall' || hit.type === 'node' || hit.type === 'furniture');
+    const shiftDrag = e.shiftKey && movable && this.app.isSelected(hit.type, hit.id);
+    if (e.shiftKey && hit && !shiftDrag) {
       this.app.toggleSelect(hit);
       return;
+    }
+    if (this.showFlooring && (!hit || hit.type === 'room')) {
+      // Flooring on: dragging a floored room moves its run's pattern; a click still selects.
+      const analysis = analyze(this.design);
+      const run = runAtPoint(this.design, raw, analysis, this.floorLayer) ?? runAtPoint(this.design, raw, analysis);
+      if (run) {
+        this.floorLayer = runLayer(run);
+        this.drag = { type: 'floor', runId: run.id, start: raw, origin: { ...resolveRun(run, this.units).origin }, hit, sx: e.clientX, sy: e.clientY, moved: false };
+        return;
+      }
     }
     if (!hit || hit.type === 'room') {
       // Box selection; a plain click (no drag) selects the room or clears.
       this.drag = { type: 'marquee', start: raw, end: raw, sx: e.clientX, sy: e.clientY, hit, additive: e.shiftKey, moved: false };
       return;
     }
+    // Pressing on a wall, corner or piece of furniture that is part of a multiple selection moves the whole selection.
+    if (movable && this.app.selectedItems().length > 1 && this.app.isSelected(hit.type, hit.id)) {
+      const ids = this.selectionNodes();
+      const furn = this.selectedFurniture();
+      if (ids.length || furn.length) {
+        const nodes = this.design.nodes.filter((nd) => ids.includes(nd.id));
+        // The moving corner nearest the press point is the one that snaps (furniture moves on the grid).
+        const anchor = hit.type === 'furniture' || !nodes.length ? null : nodes.reduce((best, nd) => (dist(nd, raw) < dist(best, raw) ? nd : best));
+        const pressed = hit.type === 'furniture' ? furn.find((f) => f.id === hit.id) : null;
+        this.drag = {
+          type: 'group', ids, anchor: anchor?.id ?? null, anchorPt: anchor ? { x: anchor.x, y: anchor.y } : pressed ? { x: pressed.x, y: pressed.y } : { ...raw },
+          start: raw, moved: false, hit, toggleOnClick: shiftDrag,
+          orig: Object.fromEntries(nodes.map((nd) => [nd.id, { x: nd.x, y: nd.y }])),
+          furn: Object.fromEntries(furn.map((f) => [f.id, { x: f.x, y: f.y }])),
+        };
+        return;
+      }
+    }
     this.app.select(hit);
     const d = this.design;
     if (hit.type === 'node') {
-      this.drag = { type: 'node', id: hit.id, start: raw, moved: false };
+      const nd = d.nodes.find((x) => x.id === hit.id);
+      this.drag = { type: 'node', id: hit.id, start: raw, orig: { x: nd.x, y: nd.y }, moved: false, hit, toggleOnClick: shiftDrag };
     } else if (hit.type === 'wall') {
       const w = d.walls.find((x) => x.id === hit.id);
       const idx = indexDesign(d);
       const A = idx.nodes.get(w.a);
       const B = idx.nodes.get(w.b);
       this.drag = {
-        type: 'wall', id: w.id, start: raw, moved: false,
+        type: 'wall', id: w.id, start: raw, moved: false, hit, toggleOnClick: shiftDrag,
         normal: perp(norm(sub(B, A))),
         orig: { [A.id]: { x: A.x, y: A.y }, [B.id]: { x: B.x, y: B.y } },
       };
     } else if (hit.type === 'opening') {
       this.drag = { type: 'opening', id: hit.id, start: raw, moved: false };
+    } else if (hit.type === 'furniture') {
+      const f = d.furniture.find((x) => x.id === hit.id);
+      this.drag = { type: 'furniture', id: f.id, start: raw, orig: { x: f.x, y: f.y }, moved: false, hit, toggleOnClick: shiftDrag };
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Layout planning
+
+  /** Furniture is drawn (and can be picked) when its layer is on, and always with the Layout tool. */
+  furnitureVisible() {
+    return this.showFurniture || this.tool === 'layout';
+  }
+
+  selectedFurniture() {
+    const ids = new Set(this.app.selectedItems().filter((i) => i.type === 'furniture').map((i) => i.id));
+    return this.design.furniture.filter((f) => ids.has(f.id));
+  }
+
+  /** The topmost item under p: overhead, then counter, floor and rugs (the reverse of the drawing order). */
+  furnitureAt(p) {
+    const rank = (r) => (r.mount === 'overhead' ? 0 : r.mount === 'counter' ? 1 : r.mount === 'rug' ? 4 : r.tuck ? 2 : 3);
+    const hits = this.design.furniture.map((f) => resolveItem(f)).filter((r) => pointInPoly(p, footprint(r).outline));
+    hits.sort((a, b) => rank(a) - rank(b) || a.w * a.d - b.w * b.d);
+    return hits.length ? { type: 'furniture', id: hits[0].item.id } : null;
+  }
+
+  /** Starts placing a catalog item (size id optional) with the Layout tool. */
+  startPlacing(type, size) {
+    if (this.tool !== 'layout') this.setTool('layout');
+    const angle = this.placing?.angle ?? 0;
+    const ghost = createFurniture(type, this.cursor?.p ?? { x: 0, y: 0 }, { size, angle });
+    this.placing = { type, size: ghost.size, angle, ghost, guides: [], shown: !!this.cursor?.p };
+    this.app.select(null);
+    this.app.inspector.render();
+    this.render();
+  }
+
+  updateGhost(raw, e) {
+    const pl = this.placing;
+    pl.ghost.angle = pl.angle;
+    const placed = this.placeFurniture(pl.ghost, raw, e);
+    Object.assign(pl.ghost, { x: placed.x, y: placed.y, angle: placed.angle });
+    pl.guides = placed.guides;
+    pl.shown = true;
+  }
+
+  /**
+   * Where an item dragged (or previewed) to `target` lands: wall pieces sit
+   * flush on the nearest wall face, facing the room; anything else keeps its
+   * angle and lines up with walls and other items, else the grid. Shift
+   * (axis) locks the move; Alt or Snap off only rounds to 1/16" or 1 mm.
+   */
+  placeFurniture(item, target, e, axis = null, from = null) {
+    const keep = (p) => {
+      if (axis && from) p[axis === 'x' ? 'y' : 'x'] = from[axis === 'x' ? 'y' : 'x'];
+      return p;
+    };
+    if (e.altKey || !this.canvas.snapOn) {
+      const f = this.canvas.fine;
+      return { ...keep({ x: Math.round(target.x / f) * f, y: Math.round(target.y / f) * f }), angle: item.angle, guides: [] };
+    }
+    const analysis = analyze(this.design);
+    if (!axis && FURNITURE[item.type]?.wall) {
+      const wp = wallPlacement(this.design, analysis, item, target, { reach: Math.max(this.px(28), 150), tol: this.px(8) });
+      if (wp) return wp;
+    }
+    const ap = alignPlacement(this.design, analysis, item, target, { tol: this.px(8) });
+    const step = this.snapStep();
+    if (ap.x === target.x) ap.x = Math.round(target.x / step) * step;
+    if (ap.y === target.y) ap.y = Math.round(target.y / step) * step;
+    return { ...keep({ x: ap.x, y: ap.y }), angle: item.angle, guides: ap.guides };
+  }
+
+  /** Layout checks, memoised on the plan and the furniture (the plan re-renders on every mouse move). */
+  layoutAnalysis(analysis) {
+    const d = this.design;
+    const key = JSON.stringify([d.nodes, d.walls, d.openings, d.rooms.map((r) => [r.id, r.name, r.dead]), d.furniture, d.units]);
+    if (this.layoutCache?.key !== key) this.layoutCache = { key, layout: analyzeLayout(d, analysis) };
+    return this.layoutCache.layout;
+  }
+
+  /** Layout keys: Esc stops placing, Q / E rotate, Ctrl+D duplicates, arrows nudge the selected furniture. */
+  onLayoutKey(e) {
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    const selected = this.selectedFurniture();
+    if (this.placing && e.key === 'Escape') {
+      this.placing = null;
+      this.app.inspector.render();
+      this.render();
+      return true;
+    }
+    if (!mod && !e.altKey && (key === 'q' || key === 'e') && (this.placing || selected.length)) {
+      const step = (e.shiftKey ? 15 : 90) * (key === 'q' ? -1 : 1);
+      if (this.placing) {
+        this.placing.angle = wrapAngle(this.placing.angle + step);
+        this.placing.ghost.angle = this.placing.angle;
+        this.render();
+      } else {
+        const ids = new Set(selected.map((f) => f.id));
+        this.app.change('Rotate furniture', (d) => d.furniture.filter((f) => ids.has(f.id)).forEach((f) => { f.angle = wrapAngle(f.angle + step); }));
+      }
+      return true;
+    }
+    if (mod && !e.altKey && key === 'd' && selected.length) {
+      let copies = [];
+      this.app.change(selected.length > 1 ? 'Duplicate furniture' : `Duplicate ${resolveItem(selected[0]).name.toLowerCase()}`, (d) => {
+        copies = selected.map((f) => duplicateFurniture(d, f.id)).filter(Boolean);
+      });
+      this.app.selectMany(copies.map((c) => ({ type: 'furniture', id: c.id })));
+      return true;
+    }
+    if (!mod && !e.altKey && e.key.startsWith('Arrow') && selected.length && !this.draw) {
+      const fine = this.units === 'metric' ? 10 : MM_PER_IN;
+      const step = fine * (e.shiftKey ? (this.units === 'metric' ? 10 : 12) : 1);
+      const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+      const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+      const ids = new Set(selected.map((f) => f.id));
+      this.app.change('Nudge furniture', (d) => d.furniture.filter((f) => ids.has(f.id)).forEach((f) => {
+        f.x += dx;
+        f.y += dy;
+      }));
+      return true;
+    }
+    return false;
+  }
+
+  /** Shift locks a move to horizontal or vertical: whichever way it has gone further from where it started. */
+  lockAxis(delta, e) {
+    if (!e.shiftKey) return { delta, axis: null };
+    const axis = Math.abs(delta.x) >= Math.abs(delta.y) ? 'x' : 'y';
+    return { delta: axis === 'x' ? { x: delta.x, y: 0 } : { x: 0, y: delta.y }, axis };
+  }
+
+  /**
+   * Where a moved point lands, from where it started (`from`) and where the
+   * drag puts it (`target`). Unlocked, it snaps like any point; locked to an
+   * axis it only slides along it, snapping to corners and guides in line
+   * (else the grid), with the lock drawn as a guide line. Alt, or Snap off,
+   * only rounds to 1/16" or 1 mm. Returns a cursor { p, kind, guides }.
+   */
+  moveSnap(target, from, axis, excludeNodes, e) {
+    const start = { x: from.x, y: from.y };
+    const other = axis === 'x' ? 'y' : 'x';
+    if (e.altKey || !this.canvas.snapOn) {
+      const f = this.canvas.fine;
+      const p = { x: Math.round(target.x / f) * f, y: Math.round(target.y / f) * f };
+      if (axis) p[other] = start[other];
+      return { p, kind: 'free', guides: axis ? [{ a: start, b: p }] : [] };
+    }
+    if (!axis) return this.snap(target, { excludeNodes, free: true });
+    const exclude = new Set(excludeNodes);
+    const targets = [
+      ...this.design.nodes.filter((nd) => !exclude.has(nd.id)).map((nd) => ({ v: nd[axis], label: 'corner', from: nd })),
+      ...this.design.guides.filter((g) => g.axis === axis).map((g) => ({ v: g.v, label: 'guide' })),
+    ];
+    const s = this.canvas.snapValue(target[axis], targets);
+    const p = { ...start, [axis]: s.v };
+    const guides = [{ a: start, b: p }];
+    if (s.from) guides.push({ a: s.from, b: p });
+    return { p, kind: s.label === 'guide' ? 'guide' : s.label ? 'aligned' : 'grid', guides };
+  }
+
+  /** Corners moved by dragging the selection: those of selected walls and rooms, and selected corners. */
+  selectionNodes() {
+    const d = this.design;
+    const items = this.app.selectedItems();
+    const wallIds = new Set(items.filter((i) => i.type === 'wall').map((i) => i.id));
+    const roomIds = new Set(items.filter((i) => i.type === 'room').map((i) => i.id));
+    if (roomIds.size) {
+      for (const g of analyze(d).rooms) if (roomIds.has(g.room?.id)) [...g.wallIds, ...g.spurWallIds].forEach((id) => wallIds.add(id));
+    }
+    const ids = new Set(items.filter((i) => i.type === 'node').map((i) => i.id));
+    for (const w of d.walls) {
+      if (!wallIds.has(w.id)) continue;
+      ids.add(w.a);
+      ids.add(w.b);
+    }
+    return [...ids];
   }
 
   addWallPoint(s) {
@@ -814,9 +1397,11 @@ export class PlanView {
   }
 
   onPointerMove(e) {
-    const raw = this.toWorld(e);
+    const scr = this.canvas.toWorld(e);
+    const raw = { x: scr.x, y: scr.y };
     const dr = this.drag;
     if (this.canvas.movePan(e)) return;
+    if (this.rulers.pointerMove(e, scr, !!dr)) return;
     if (dr?.type === 'marquee') {
       if (Math.hypot(e.clientX - dr.sx, e.clientY - dr.sy) > 4) dr.moved = true;
       dr.end = raw;
@@ -824,7 +1409,31 @@ export class PlanView {
       this.render();
       return;
     }
-    if (dr && (dr.type === 'node' || dr.type === 'wall' || dr.type === 'opening')) {
+    if (dr?.type === 'floor') {
+      if (!dr.moved && Math.hypot(e.clientX - dr.sx, e.clientY - dr.sy) < 4) return;
+      if (!dr.moved) {
+        dr.moved = true;
+        if (dr.hit?.type === 'room') this.app.select(dr.hit);
+        this.app.beginLive();
+      }
+      const run = this.design.floorRuns.find((r) => r.id === dr.runId);
+      // Shift locks the pattern's move to horizontal or vertical; Alt moves it without snapping.
+      const { delta, axis } = this.lockAxis(sub(raw, dr.start), e);
+      let origin = add(dr.origin, delta);
+      this.floorSnap = null;
+      if (this.canvas.snapOn && !e.altKey) {
+        const snapped = snapOrigin(this.floorLayout(run, analyze(this.design)), origin, this.px(8));
+        origin = snapped.origin;
+        if (axis) origin[axis === 'x' ? 'y' : 'x'] = dr.origin[axis === 'x' ? 'y' : 'x'];
+        this.floorSnap = snapped.targets;
+      }
+      run.origin = { x: Math.round(origin.x * 10) / 10, y: Math.round(origin.y * 10) / 10 };
+      this.cursor = { p: raw };
+      this.app.live();
+      this.scheduleInspector();
+      return;
+    }
+    if (dr && (dr.type === 'node' || dr.type === 'wall' || dr.type === 'opening' || dr.type === 'group' || dr.type === 'furniture')) {
       if (!dr.moved && dist(raw, dr.start) < this.px(3)) return;
       if (!dr.moved) {
         dr.moved = true;
@@ -843,6 +1452,17 @@ export class PlanView {
       this.cursor = this.draw ? this.rectCorner(raw, this.draw.start) : this.snap(raw, {});
     } else if (this.tool in { door: 1, window: 1, opening: 1 }) {
       this.cursor = { p: raw, opening: this.openingTarget(raw) };
+    } else if (this.tool === 'measure') {
+      const m = this.measuring;
+      this.hover = null;
+      if (m?.pressed && Math.hypot(e.clientX - m.sx, e.clientY - m.sy) > 4) m.moved = true;
+      this.cursor = this.measureSnap(raw, m?.a, e.shiftKey);
+      if (m) m.b = this.cursor.p;
+      this.measureHover = m ? null : faceAtPoint(this.measureFaces(analyze(this.design)), raw, this.px(16));
+    } else if (this.tool === 'layout' && this.placing) {
+      this.hover = null;
+      this.updateGhost(raw, e);
+      this.cursor = { p: raw, guides: this.placing.guides };
     } else if (this.tool === 'pan') {
       this.hover = null;
       this.cursor = { p: raw };
@@ -861,6 +1481,8 @@ export class PlanView {
       const hit = this.hitTest(raw);
       if (JSON.stringify(hit) !== JSON.stringify(this.hover)) this.hover = hit;
       this.cursor = { p: raw };
+      const grab = this.tool === 'select' && this.showFlooring && (!hit || hit.type === 'room') && !!runAtPoint(this.design, raw);
+      this.svg.classList.toggle('floor-grab', grab);
     }
     this.app.emit('cursor', this.cursor?.p);
     this.render();
@@ -869,16 +1491,43 @@ export class PlanView {
   dragUpdate(dr, raw, e) {
     const d = this.design;
     const idx = indexDesign(d);
-    if (dr.type === 'node') {
+    if (dr.type === 'group') {
+      // Everything moves by one offset: where the anchor corner lands (furniture alone moves on the grid).
+      const from = dr.anchorPt;
+      const { delta, axis } = this.lockAxis(sub(raw, dr.start), e);
+      let s;
+      if (dr.anchor) {
+        s = this.moveSnap(add(from, delta), from, axis, dr.ids, e);
+      } else {
+        const step = e.altKey || !this.canvas.snapOn ? this.canvas.fine : this.snapStep();
+        const p = { x: from.x + Math.round(delta.x / step) * step, y: from.y + Math.round(delta.y / step) * step };
+        s = { p, kind: 'grid', guides: axis ? [{ a: from, b: p }] : [] };
+      }
+      this.cursor = s;
+      const k = sub(s.p, from);
+      for (const id of dr.ids) {
+        const nd = idx.nodes.get(id);
+        nd.x = dr.orig[id].x + k.x;
+        nd.y = dr.orig[id].y + k.y;
+      }
+      for (const [id, o] of Object.entries(dr.furn ?? {})) {
+        const f = d.furniture.find((x) => x.id === id);
+        if (!f) continue;
+        f.x = o.x + k.x;
+        f.y = o.y + k.y;
+      }
+    } else if (dr.type === 'node') {
       const node = idx.nodes.get(dr.id);
-      const s = this.snap(raw, { excludeNodes: [dr.id], free: true });
+      const { delta, axis } = this.lockAxis(sub(raw, dr.start), e);
+      const s = this.moveSnap(add(dr.orig, delta), dr.orig, axis, [dr.id], e);
       node.x = s.p.x;
       node.y = s.p.y;
       this.cursor = s;
     } else if (dr.type === 'wall') {
+      // A wall already slides only at right angles to itself; Alt frees it from the grid.
       const step = this.snapStep();
       let k = dot(sub(raw, dr.start), dr.normal);
-      if (!e.shiftKey) k = Math.round(k / step) * step;
+      if (!e.altKey) k = Math.round(k / step) * step;
       for (const [id, o] of Object.entries(dr.orig)) {
         const nd = idx.nodes.get(id);
         nd.x = o.x + dr.normal.x * k;
@@ -890,10 +1539,16 @@ export class PlanView {
       const g = openingGeometry(d, o, idx);
       const fine = this.canvas.snapOn ? (d.units === 'metric' ? 10 : MM_PER_IN) : this.canvas.fine;
       let offset = dot(sub(raw, g.A), g.dir);
-      if (!e.shiftKey) offset = Math.round(offset / fine) * fine;
+      if (!e.altKey) offset = Math.round(offset / fine) * fine;
       if (this.canvas.snapOn && Math.abs(offset - g.length / 2) < this.px(8)) offset = g.length / 2;
       // Slide up against neighbours rather than overlapping them.
       o.offset = freeOpeningOffset(d, o, offset, g.length) ?? o.offset;
+    } else if (dr.type === 'furniture') {
+      const f = d.furniture.find((x) => x.id === dr.id);
+      const { delta, axis } = this.lockAxis(sub(raw, dr.start), e);
+      const placed = this.placeFurniture(f, add(dr.orig, delta), e, axis, dr.orig);
+      Object.assign(f, { x: placed.x, y: placed.y, angle: placed.angle ?? f.angle });
+      this.cursor = { p: raw, guides: placed.guides };
     }
   }
 
@@ -902,6 +1557,24 @@ export class PlanView {
     this.drag = null;
     if (this.svg.hasPointerCapture(e.pointerId)) this.svg.releasePointerCapture(e.pointerId);
     if (this.canvas.endPan()) return;
+    if (this.rulers.pointerUp()) return;
+    const m = this.tool === 'measure' ? this.measuring : null;
+    if (m?.pressed) {
+      // A drag measures point to point; a click on a wall face pins its length;
+      // any other click starts a click, click measure.
+      m.pressed = false;
+      if (m.moved) this.addMeasure({ kind: 'line', a: m.a, b: m.b });
+      else if (m.face) this.addMeasure(this.faceMeasure(m.face));
+      this.render();
+      return;
+    }
+    if (dr?.type === 'floor') {
+      this.floorSnap = null;
+      if (dr.moved) this.app.endLive('Move flooring layout');
+      else this.app.select(dr.hit?.type === 'room' ? dr.hit : null);
+      this.render();
+      return;
+    }
     if (dr?.type === 'marquee') {
       this.marqueeHits = null;
       if (!dr.moved) {
@@ -914,7 +1587,11 @@ export class PlanView {
       return;
     }
     if (dr && dr.moved) {
-      this.app.endLive(dr.type === 'opening' ? 'Move opening' : dr.type === 'wall' ? 'Move wall' : 'Move corner');
+      this.app.endLive({ opening: 'Move opening', wall: 'Move wall', group: 'Move selection', furniture: 'Move furniture' }[dr.type] ?? 'Move corner');
+      return;
+    }
+    if (dr?.toggleOnClick) {
+      this.app.toggleSelect(dr.hit);
       return;
     }
     if (this.tool === 'rect' && this.draw?.downAt) {
@@ -940,10 +1617,33 @@ export class PlanView {
 
   /** Keyboard input routed from the app; returns true when consumed. */
   onKey(e) {
+    // Ruler guides: a typed distance + Enter while dragging one, or straight after placing it.
+    if (this.rulers.key(e)) return true;
     if (this.tool === 'level' && this.onLevelKey(e)) return true;
+    if (this.onLayoutKey(e)) return true;
+    if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'f' && !this.typed) {
+      this.setFlooring(!this.showFlooring);
+      return true;
+    }
+    if (this.showFlooring && !this.draw && !e.ctrlKey && !e.metaKey && e.key.startsWith('Arrow') && this.nudgeFloor(e)) return true;
     if (!e.ctrlKey && !e.metaKey && !e.altKey && !this.typed && (e.key === 's' || e.key === 'g' || e.key === 'S' || e.key === 'G')) {
       this.canvas.toggle(e.key.toLowerCase() === 's' ? 'snapOn' : 'gridOn');
       return true;
+    }
+    if (this.tool === 'measure' && !e.ctrlKey && !e.metaKey) {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (this.measuring) this.measuring = null;
+        else if (this.measures.length) this.removeMeasure(this.measures.length - 1);
+        this.render();
+        return true; // never deletes the selection from here
+      }
+      if (e.key === 'Escape' && (this.measuring || this.measures.length)) {
+        if (this.measuring) this.measuring = null;
+        else this.measures = [];
+        this.app.inspector.render();
+        this.render();
+        return true;
+      }
     }
     const drawing = (this.tool === 'wall' && this.draw) || (this.tool === 'rect' && this.draw);
     if (drawing && e.key.length === 1 && TYPABLE.test(e.key) && !e.ctrlKey && !e.metaKey) {
@@ -1016,25 +1716,156 @@ export class PlanView {
 
   renderNow() {
     this.worldLayer.setAttribute('transform', this.canvas.worldTransform());
+    this.svg.classList.toggle('placing', !!this.placing);
     this.gridLayer.innerHTML = this.canvas.gridSvg();
     this.renderBar();
     const analysis = analyze(this.design);
     const level = this.tool === 'level' ? this.renderLevel(analysis) : null;
+    const floor = this.showFlooring && !level ? this.renderFlooring(analysis) : null;
+    const layout = this.currentLayout(analysis, level);
     this.worldLayer.innerHTML = [
       this.renderRooms(analysis),
+      floor?.under,
       level?.heat,
+      layout ? this.renderFurniture(layout, 'rug') : '',
+      layout ? this.renderClearances(layout) : '',
       this.renderWalls(analysis),
-      this.renderOpenings(analysis),
+      floor?.doorways,
+      this.renderOpenings(analysis, floor?.openings),
       this.renderFaceTrim(analysis),
+      layout ? this.renderFurniture(layout) : '',
       this.renderDimensions(analysis),
       level ? '' : this.renderRoomLabels(analysis),
       level?.survey,
+      floor?.marks,
       this.renderSelection(analysis),
-      this.renderPreview(),
+      layout ? this.renderLayoutMarks(layout) : '',
+      this.renderMeasures(),
+      this.renderPreview(analysis),
     ].join('');
     const cur = this.cursor?.p;
-    this.overlayLayer.innerHTML = this.renderOverlay(level) + this.canvas.rulersSvg({ cursor: cur && { x: cur.x, y: cur.y } });
+    const legend = floor?.layout ? renderFloorLegend(floor.layout, this.units, this.drag?.type === 'floor' && this.drag.moved, this.canvas.rect().height) : '';
+    this.overlayLayer.innerHTML = this.canvas.rulerGuidesSvg() + this.renderOverlay(level) + legend + this.canvas.rulersSvg({ cursor: cur && { x: cur.x, y: cur.y } });
     this.updatePalette(level);
+  }
+
+  /**
+   * The layout to draw, or null when furniture is hidden (or the Level tool
+   * is on). While placing, the preview is checked as if it were placed.
+   */
+  currentLayout(analysis, level) {
+    const d = this.design;
+    const ghost = this.placing?.shown && this.cursor ? this.placing.ghost : null;
+    this.lastGhostIssue = null;
+    if (level || !this.furnitureVisible() || (!d.furniture.length && !ghost)) return null;
+    if (!ghost) return this.layoutAnalysis(analysis);
+    const layout = analyzeLayout({ ...d, furniture: [...d.furniture, ghost] }, analysis);
+    layout.ghostId = ghost.id;
+    this.lastGhostIssue = layout.items.find((x) => x.r.item.id === ghost.id)?.issues[0]?.message ?? null;
+    return layout;
+  }
+
+  /** Is this layout item the focus: selected, being dragged or the placing preview? */
+  furnitureFocus(layout, id) {
+    return id === layout.ghostId || this.app.isSelected('furniture', id) || (this.drag?.type === 'furniture' && this.drag.id === id);
+  }
+
+  /**
+   * Furniture symbols: rugs (layer 'rug') under the walls, the rest above
+   * them; chairs under tables, then floor pieces, counter pieces and
+   * overhead units (dashed). Items with problems are outlined red (errors)
+   * or amber (warnings).
+   */
+  renderFurniture(layout, layer = 'main') {
+    const sw = this.px(1);
+    const rank = (r) => (r.mount === 'rug' ? 0 : r.tuck ? 1 : r.mount === 'floor' ? 2 : r.mount === 'counter' ? 3 : 4);
+    const items = layout.items.filter((x) => (layer === 'rug') === (x.r.mount === 'rug')).sort((a, b) => rank(a.r) - rank(b.r));
+    const out = [];
+    for (const x of items) {
+      const id = x.r.item.id;
+      const state = x.issues.some((i) => i.severity === 'error') ? ' error' : x.issues.length ? ' warn' : '';
+      const active = this.isActive('furniture', id) ? ' active' : '';
+      const hover = this.hover?.type === 'furniture' && this.hover.id === id ? ' hover' : '';
+      const ghost = id === layout.ghostId ? ' ghost' : '';
+      out.push(furnitureGroup(x.r, sw, `fu fu-${x.r.mount} fu-${x.r.def.category}${state}${active}${hover}${ghost}`));
+      const min = Math.min(x.r.w, x.r.d);
+      const text = applianceTag(x.r);
+      if (text && min > this.px(20)) out.push(this.label(x.r.c, text, uprightAngle(x.r.ux), 'fu-tag', 9));
+      else if (this.tool === 'layout' && min > this.px(54) && x.r.mount !== 'rug') {
+        out.push(this.label(toWorld(x.r, 0, x.r.d * 0.12), x.r.name, uprightAngle(x.r.ux), 'fu-name', 10));
+      }
+    }
+    return out.join('');
+  }
+
+  /**
+   * Clear floor each piece needs (bed sides, in front of cabinets and
+   * appliances, around tables...): every piece's with the Layout tool
+   * ('all'), otherwise the selected one's. Zones short of what they need
+   * are red.
+   */
+  renderClearances(layout) {
+    const all = this.tool === 'layout' && this.showClearances === 'all';
+    const out = [];
+    for (const x of layout.items) {
+      const focus = this.furnitureFocus(layout, x.r.item.id);
+      if (!x.zones.length || (!all && !focus)) continue;
+      const short = (side) => {
+        const s = x.sides[side];
+        return !!s && s.need > 0 && s.have < s.need - MM_PER_IN / 2;
+      };
+      for (const z of x.zones) {
+        let bad = short(z.side);
+        // Twin beds and bunks only need one side clear.
+        if (bad && x.r.oneSide && (z.side === 'left' || z.side === 'right')) bad = short(z.side === 'left' ? 'right' : 'left');
+        out.push(tag('polygon', { class: `clear-zone${bad ? ' short' : ''}${focus ? ' focus' : ''}`, points: pts(z.poly), 'stroke-width': this.px(1) }, null));
+      }
+    }
+    return out.join('');
+  }
+
+  /**
+   * On top of the plan: the clear distance from each side of the focused
+   * piece to the nearest wall or piece (out to 10'), red where it is less
+   * than the piece needs; and with the Layout tool, the kitchen work
+   * triangle and TV viewing distances.
+   */
+  renderLayoutMarks(layout) {
+    const out = [];
+    const fmt = (v) => formatLength(v, this.units, { precision: 'label' });
+    const focus = layout.items.filter((x) => this.furnitureFocus(layout, x.r.item.id));
+    if (focus.length === 1) {
+      const x = focus[0];
+      const { r } = x;
+      for (const [side, s] of Object.entries(x.sides)) {
+        if (!s.at || s.have < 1) continue;
+        const l = toLocal(r, s.at);
+        const from = side === 'front' ? toWorld(r, l.x, r.d / 2) : side === 'back' ? toWorld(r, l.x, -r.d / 2) : side === 'left' ? toWorld(r, -r.w / 2, l.y) : toWorld(r, r.w / 2, l.y);
+        const bad = s.need > 0 && s.have < s.need - MM_PER_IN / 2;
+        out.push(this.dimensionLine(from, s.at, fmt(s.have), `fu-gap${bad ? ' short' : ''}`));
+      }
+    }
+    if (this.tool === 'layout') {
+      for (const t of layout.triangles) {
+        out.push(tag('polygon', { class: `work-triangle${t.ok ? ' ok' : ' bad'}`, points: pts(t.points), 'stroke-width': this.px(1.5), 'stroke-dasharray': `${n(this.px(6))} ${n(this.px(4))}` }, null));
+        t.points.forEach((p, i) => {
+          const q = t.points[(i + 1) % 3];
+          const leg = t.legs[i];
+          const bad = leg.len < 48 * MM_PER_IN || leg.len > 108 * MM_PER_IN;
+          out.push(this.label(scale(add(p, q), 0.5), fmt(leg.len), 0, `work-leg${bad ? ' bad' : ''}`, 10));
+        });
+      }
+      const idx = new Map(layout.items.map((x) => [x.r.item.id, x]));
+      for (const v of layout.tvs) {
+        const tv = idx.get(v.tvId)?.r;
+        const seat = idx.get(v.seatId)?.r;
+        if (!tv || !seat) continue;
+        const a = toWorld(tv, 0, tv.d / 2);
+        out.push(tag('line', { class: `tv-line${v.ok ? ' ok' : ' bad'}`, x1: a.x, y1: a.y, x2: seat.c.x, y2: seat.c.y, 'stroke-width': this.px(1), 'stroke-dasharray': `${n(this.px(2))} ${n(this.px(3))}` }, null));
+        out.push(this.label(scale(add(a, seat.c), 0.5), `${fmt(v.distance)} to the screen`, uprightAngle(sub(seat.c, a)), `tv-text${v.ok ? '' : ' bad'}`, 10));
+      }
+    }
+    return out.join('');
   }
 
   /**
@@ -1066,10 +1897,16 @@ export class PlanView {
 
   renderRooms(analysis) {
     const hov = this.hover;
-    return analysis.rooms
+    // Dead space is hatched, at a constant spacing on screen.
+    const k = this.px(9);
+    const hatch = analysis.rooms.some((g) => g.dead)
+      ? `<defs><pattern id="dead-hatch" patternUnits="userSpaceOnUse" width="${n(k)}" height="${n(k)}" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="${n(k)}" class="dead-hatch" stroke-width="${n(this.px(1))}"/></pattern></defs>`
+      : '';
+    return hatch + analysis.rooms
       .map((g) => {
         const id = g.room?.id;
-        const cls = ['room', id && this.app.isSelected('room', id) && 'selected', hov?.type === 'room' && hov.id === id && 'hover'].filter(Boolean).join(' ');
+        const cls = ['room', g.dead && 'dead', id && this.app.isSelected('room', id) && 'selected', hov?.type === 'room' && hov.id === id && 'hover'].filter(Boolean).join(' ');
+        if (g.dead) return tag('polygon', { class: cls, points: pts(g.polygon) }) + tag('polygon', { class: 'dead-fill', points: pts(g.polygon) }, null);
         let extra = '';
         const spec = resolveRoomCeiling(this.design, g.room);
         if (spec.type !== 'flat') extra = this.renderCeilingHint(g, spec);
@@ -1128,25 +1965,10 @@ export class PlanView {
 
   renderWalls(analysis) {
     const d = this.design;
-    const idx = analysis.idx;
-    const deg = nodeDegrees(d);
-    const byNode = new Map();
-    for (const w of d.walls) {
-      for (const id of [w.a, w.b]) {
-        if (!byNode.has(id)) byNode.set(id, []);
-        byNode.get(id).push(w);
-      }
-    }
+    const outlines = wallOutlines(d, analysis.idx);
     const out = [];
     for (const w of d.walls) {
-      const A = idx.nodes.get(w.a);
-      const B = idx.nodes.get(w.b);
-      const u = norm(sub(B, A));
-      const nrm = scale(perp(u), w.thickness / 2);
-      const endA = endCorners(A, u, w, byNode.get(w.a), idx, deg.get(w.a));
-      const endB = endCorners(B, scale(u, -1), w, byNode.get(w.b), idx, deg.get(w.b));
-      // At B the away-direction is reversed, so its "plus" side is the wall's minus side.
-      const poly = [endA.plus ?? add(A, nrm), endB.minus ?? add(B, nrm), endB.plus ?? sub(B, nrm), endA.minus ?? sub(A, nrm)];
+      const poly = outlines.get(w.id);
       const info = analysis.wallInfo.get(w.id);
       const cls = ['wall', info?.exterior && 'exterior', this.isActive('wall', w.id) && 'selected', this.hover?.type === 'wall' && this.hover.id === w.id && 'hover']
         .filter(Boolean).join(' ');
@@ -1155,7 +1977,8 @@ export class PlanView {
     return `<g class="walls">${out.join('')}</g>`;
   }
 
-  renderOpenings(analysis) {
+  /** `floored`: ids of openings a flooring run is drawn through (their cut is left open to show it). */
+  renderOpenings(analysis, floored = null) {
     const d = this.design;
     const idx = analysis.idx;
     const sw = this.px(1.25);
@@ -1169,7 +1992,7 @@ export class PlanView {
       const selected = this.isActive('opening', o.id);
       const hover = this.hover?.type === 'opening' && this.hover.id === o.id;
       const cls = `opening ${o.type}${selected ? ' selected' : ''}${hover ? ' hover' : ''}`;
-      let body = tag('polygon', { class: 'cut', points: pts(cut) }, null);
+      let body = tag('polygon', { class: floored?.has(o.id) ? 'cut floored' : 'cut', points: pts(cut) }, null);
       body += tag('line', { class: 'jamb', x1: cut[0].x, y1: cut[0].y, x2: cut[3].x, y2: cut[3].y, 'stroke-width': sw }, null);
       body += tag('line', { class: 'jamb', x1: cut[1].x, y1: cut[1].y, x2: cut[2].x, y2: cut[2].y, 'stroke-width': sw }, null);
       if (o.type === 'window') {
@@ -1180,16 +2003,7 @@ export class PlanView {
           body += tag('line', { class: 'glass', x1: a.x, y1: a.y, x2: b.x, y2: b.y, 'stroke-width': sw }, null);
         }
       } else if (o.type === 'door') {
-        const side = o.flipY ? -1 : 1;
-        const hinge = o.flipX ? g.end : g.start;
-        const other = o.flipX ? g.start : g.end;
-        const face = scale(nn, (side * g.wall.thickness) / 2);
-        const H = add(hinge, face);
-        const J = add(other, face);
-        const leaf = add(H, scale(nn, side * o.width));
-        const sweep = crossZ(sub(leaf, H), sub(J, H)) > 0 ? 1 : 0;
-        body += tag('line', { class: 'leaf', x1: H.x, y1: H.y, x2: leaf.x, y2: leaf.y, 'stroke-width': this.px(2) }, null);
-        body += tag('path', { class: 'swing', d: `M${n(leaf.x)} ${n(leaf.y)}A${n(o.width)} ${n(o.width)} 0 0 ${sweep} ${n(J.x)} ${n(J.y)}`, 'stroke-width': sw }, null);
+        body += this.doorSymbol(o, g, sw);
       } else {
         const a = g.start;
         const b = g.end;
@@ -1201,7 +2015,64 @@ export class PlanView {
   }
 
   /**
-   * Trim on the plan (unless turned off in the plan settings): baseboard as a
+   * Plan symbol for each door style: a leaf and swing arc (two half-width
+   * leaves for a pair), two overlapping bypass panels in the wall, a slab
+   * half drawn into its dashed pocket, or a barn slab hung open on the face
+   * beside the opening with its track. Sliding doors open toward the hinge
+   * side (flipX); swings and barn doors are on the flipY side of the wall.
+   */
+  doorSymbol(o, g, sw) {
+    const T = g.wall.thickness;
+    const nn = g.normal;
+    const side = o.flipY ? -1 : 1;
+    const style = doorStyle(o);
+    const face = scale(nn, (side * T) / 2);
+    const swing = (H, width, J) => {
+      const leaf = add(H, scale(nn, side * width));
+      const sweep = crossZ(sub(leaf, H), sub(J, H)) > 0 ? 1 : 0;
+      return tag('line', { class: 'leaf', x1: H.x, y1: H.y, x2: leaf.x, y2: leaf.y, 'stroke-width': this.px(2) }, null) +
+        tag('path', { class: 'swing', d: `M${n(leaf.x)} ${n(leaf.y)}A${n(width)} ${n(width)} 0 0 ${sweep} ${n(J.x)} ${n(J.y)}`, 'stroke-width': sw }, null);
+    };
+    if (style === 'single') {
+      const hinge = o.flipX ? g.end : g.start;
+      const other = o.flipX ? g.start : g.end;
+      return swing(add(hinge, face), o.width, add(other, face));
+    }
+    if (style === 'double') {
+      const mid = add(g.center, face);
+      return swing(add(g.start, face), o.width / 2, mid) + swing(add(g.end, face), o.width / 2, mid);
+    }
+    // Sliding styles: panels as thin boxes from s0 to s1 along the wall (from the opening's start), k off the centreline.
+    const panel = (s0, s1, k, thick, cls, dash) => {
+      const a = add(add(g.start, scale(g.dir, s0)), scale(nn, k));
+      const b = add(add(g.start, scale(g.dir, s1)), scale(nn, k));
+      const hh = scale(nn, thick / 2);
+      return tag('polygon', { class: cls, points: pts([add(a, hh), add(b, hh), sub(b, hh), sub(a, hh)]), 'stroke-width': sw, 'stroke-dasharray': dash }, null);
+    };
+    const thick = Math.max(Math.min(T * 0.22, 45), this.px(2.5));
+    const w = o.width;
+    const toStart = !o.flipX;
+    if (style === 'sliding') {
+      const lap = Math.min(w * 0.05, 50);
+      return panel(0, w / 2 + lap, thick * 0.6, thick, 'slab') + panel(w / 2 - lap, w, -thick * 0.6, thick, 'slab');
+    }
+    if (style === 'pocket') {
+      const dash = `${n(this.px(4))} ${n(this.px(3))}`;
+      return (toStart ? panel(-w, 0, 0, thick * 1.8, 'pocket', dash) + panel(-w / 2, w / 2, 0, thick, 'slab')
+        : panel(w, 2 * w, 0, thick * 1.8, 'pocket', dash) + panel(w / 2, 1.5 * w, 0, thick, 'slab'));
+    }
+    // Barn: the slab laps the opening by BARN_OVERLAP each side when shut; its track spans shut and open.
+    const slab = w + 2 * BARN_OVERLAP;
+    const k = side * (T / 2 + thick / 2 + this.px(1.5));
+    const [t0, t1] = toStart ? [-slab, w + BARN_OVERLAP] : [-BARN_OVERLAP, w + slab];
+    const a = add(add(g.start, scale(g.dir, t0)), scale(nn, k));
+    const b = add(add(g.start, scale(g.dir, t1)), scale(nn, k));
+    return tag('line', { class: 'track', x1: a.x, y1: a.y, x2: b.x, y2: b.y, 'stroke-width': sw, 'stroke-dasharray': `${n(this.px(6))} ${n(this.px(2))}` }, null) +
+      panel(toStart ? -slab : w, toStart ? 0 : w + slab, k, thick, 'slab');
+  }
+
+  /**
+   * Trim on the plan (unless turned off in the plan settings): baseboard (with any shoe moulding in front of it) as a
    * solid band along the floor line, crown (and tray crown) as a dashed band
    * at its projection, both mitred where they meet at corners, and casing
    * legs, stools and sills around cased doors and windows. With the Trim
@@ -1219,6 +2090,7 @@ export class PlanView {
       const stock = this.units === 'metric' ? 18 : 0.75 * MM_PER_IN;
       const depth = (x) => {
         if (x.category === 'crown') return Math.max(x.size * 0.7, this.px(7));
+        if (x.category === 'shoe') return Math.max(x.size * 0.67, this.px(2.5)); // ½" deep for ¾" shoe
         if (x.part === 'leg') return Math.max(stock, this.px(4.5));
         if (x.part === 'stool' || x.part === 'sill') return Math.max(x.size, this.px(5));
         return Math.max(stock, this.px(3.5));
@@ -1228,7 +2100,7 @@ export class PlanView {
       const layer = (b) => (b.category === 'crown' ? 0 : b.part === 'run' ? 1 : 2);
       for (const b of [...bands].sort((p, q) => layer(p) - layer(q))) {
         const crown = b.category === 'crown';
-        const cls = crown ? 'crown' : b.part === 'run' ? 'baseboard' : b.part === 'leg' ? 'casing' : 'stool';
+        const cls = crown ? 'crown' : b.part === 'run' ? (b.category === 'shoe' ? 'shoe' : 'baseboard') : b.part === 'leg' ? 'casing' : 'stool';
         out.push(tag('polygon', {
           class: `plan-trim ${cls}`, points: pts(b.poly), 'stroke-width': this.px(1),
           'stroke-dasharray': crown ? `${n(this.px(4))} ${n(this.px(3))}` : undefined,
@@ -1257,37 +2129,70 @@ export class PlanView {
     }, esc(text));
   }
 
+  /**
+   * Wall face lengths: the interior faces of every room, plus the outside
+   * of the building in 'both' mode, split either side of any openings. Walls with no face (free-standing, or
+   * stubs inside a room) show the length of each side.
+   */
   renderDimensions(analysis) {
     const mode = this.design.settings.dimensionMode;
     if (mode === 'off') return '';
     const out = [];
-    const units = this.units;
-    if (mode === 'interior') {
-      for (const g of analysis.rooms) {
-        for (const w of g.walls) {
-          if (w.length * this.view.scale < 28) continue;
-          const mid = add(w.P, scale(sub(w.Q, w.P), 0.5));
-          const p = add(mid, scale(perp(w.dir), this.px(11)));
-          out.push(this.label(p, formatLength(w.length, units, { precision: 'label' }), uprightAngle(w.dir), 'dim', 11));
-        }
+    const fmt = (v) => formatLength(v, this.units, { precision: 'label' });
+    const covered = new Set();
+    // A face's region is on its perp(dir) side, so labels sit just inside the room (or outside the building).
+    // A face with doors, windows or openings is labelled piece by piece: the wall either side of each
+    // opening, plus the opening's own width (muted), instead of the whole run.
+    const faceLabel = (f, cls) => {
+      const at = (s0, s1, text, c, size, minPx) => {
+        if ((s1 - s0) * this.view.scale < minPx) return;
+        const mid = add(f.P, scale(f.dir, (s0 + s1) / 2));
+        out.push(this.label(add(mid, scale(perp(f.dir), this.px(11))), text, uprightAngle(f.dir), c, size));
+      };
+      const runs = faceRuns(f);
+      if (!runs.openings.length) return at(0, f.length, fmt(f.length), cls, 11, 28);
+      for (const w of runs.walls) at(w.s0, w.s1, fmt(w.s1 - w.s0), cls, 11, 24);
+      for (const o of runs.openings) at(o.s0, o.s1, fmt(o.s1 - o.s0), `${cls} opening-width`, 9.5, 30);
+    };
+    for (const g of analysis.rooms) {
+      for (const f of g.walls) {
+        f.wallIds.forEach((id) => covered.add(id));
+        faceLabel(f, g.dead ? 'dim dead' : 'dim');
       }
     }
-    // Centreline labels: all walls in centreline mode, otherwise walls that bound no room.
-    const idx = analysis.idx;
+    for (const f of analysis.exteriorFaces) {
+      f.wallIds.forEach((id) => covered.add(id));
+      if (mode === 'both') faceLabel(f, 'dim exterior');
+    }
+    const outlines = wallOutlines(this.design, analysis.idx);
     for (const w of this.design.walls) {
-      const info = analysis.wallInfo.get(w.id);
-      if (mode === 'interior' && info.roomSides.some(Boolean)) continue;
-      const A = idx.nodes.get(w.a);
-      const B = idx.nodes.get(w.b);
-      const L = dist(A, B);
-      if (L * this.view.scale < 28) continue;
-      const u = norm(sub(B, A));
-      let side = perp(u);
-      if (info.roomSides[0] && !info.roomSides[1]) side = scale(side, -1);
-      const p = add(add(A, scale(u, L / 2)), scale(side, w.thickness / 2 + this.px(10)));
-      out.push(this.label(p, formatLength(L, units, { precision: 'label' }), uprightAngle(u), 'dim centerline', 11));
+      if (covered.has(w.id)) continue;
+      for (const [p, q, side] of outlineSides(outlines.get(w.id))) {
+        const L = dist(p, q);
+        if (L * this.view.scale < 28) continue;
+        const mid = add(p, scale(sub(q, p), 0.5));
+        out.push(this.label(add(mid, scale(side, this.px(10))), fmt(L), uprightAngle(sub(q, p)), 'dim', 11));
+      }
     }
     return `<g class="dims">${out.join('')}</g>`;
+  }
+
+  /**
+   * Gap dimensions from an opening (spans from wallFaceSpans) to the corners
+   * of each face it sits in, drawn just off the face on its own side, plus
+   * the opening's width on the first face when `width` is set.
+   */
+  faceGapDims(spans, cls, width = false) {
+    const out = [];
+    const fmt = (v) => formatLength(v, this.units, { precision: 'label' });
+    spans.forEach(({ face: f, s0, s1 }, i) => {
+      const off = scale(perp(f.dir), this.px(22));
+      const at = (s) => add(add(f.P, scale(f.dir, s)), off);
+      if (s0 > 1) out.push(this.dimensionLine(at(0), at(s0), fmt(s0), cls));
+      if (f.length - s1 > 1) out.push(this.dimensionLine(at(s1), at(f.length), fmt(f.length - s1), cls));
+      if (width && i === 0) out.push(this.dimensionLine(at(Math.max(0, s0)), at(Math.min(f.length, s1)), fmt(s1 - s0), `${cls} strong`));
+    });
+    return out.join('');
   }
 
   renderRoomLabels(analysis) {
@@ -1295,6 +2200,10 @@ export class PlanView {
     return analysis.rooms
       .map((g) => {
         const p = g.labelPoint;
+        if (g.dead) {
+          return this.label({ x: p.x, y: p.y - this.px(7) }, 'Dead space', 0, 'room-name dead', 12) +
+            this.label({ x: p.x, y: p.y + this.px(7) }, formatArea(g.area, units), 0, 'room-area', 10);
+        }
         const spec = resolveRoomCeiling(this.design, g.room);
         const h = formatLength(spec.height, units, { precision: 'label' });
         const ceiling = spec.type === 'flat' ? `${h} clg`
@@ -1331,8 +2240,18 @@ export class PlanView {
         const info = analysis.wallInfo.get(w.id);
         let side = scale(perp(u), -1);
         if (info.roomSides[1] && !info.roomSides[0]) side = scale(side, -1);
-        const off = w.thickness / 2 + this.px(26);
-        out.push(this.dimensionLine(add(A, scale(side, off)), add(B, scale(side, off)), formatLength(dist(A, B), this.units), 'sel-dim'));
+        // The length of each face along the wall (interior, and exterior when there is one), not the centreline.
+        const faces = facesOfWall(analysis, w.id);
+        for (const f of faces) {
+          const off = scale(perp(f.dir), this.px(26));
+          out.push(this.dimensionLine(add(f.P, off), add(f.Q, off), formatLength(f.length, this.units), 'sel-dim'));
+        }
+        if (!faces.length) {
+          for (const [p, q, s2] of outlineSides(wallOutlines(d, idx).get(w.id))) {
+            const off = scale(s2, this.px(20));
+            out.push(this.dimensionLine(add(p, off), add(q, off), formatLength(dist(p, q), this.units), 'sel-dim'));
+          }
+        }
         out.push(this.label(add(A, scale(side, -w.thickness / 2 - this.px(9))), 'A', 0, 'end-label', 10));
         out.push(this.label(add(B, scale(side, -w.thickness / 2 - this.px(9))), 'B', 0, 'end-label', 10));
       }
@@ -1340,7 +2259,11 @@ export class PlanView {
     if (sel?.type === 'opening') {
       const o = d.openings.find((x) => x.id === sel.id);
       const g = o && openingGeometry(d, o, idx);
-      if (g) {
+      const spans = g ? wallFaceSpans(analysis, o.wallId, o.offset, o.width) : [];
+      if (spans.length) {
+        // Gaps to the corners of each face the opening is in: what you measure on site.
+        out.push(this.faceGapDims(spans, 'sel-dim', true));
+      } else if (g) {
         const off = scale(g.normal, -(g.wall.thickness / 2 + this.px(22)));
         const L1 = dist(g.A, g.start);
         const L2 = dist(g.end, g.B);
@@ -1363,7 +2286,7 @@ export class PlanView {
       this.label(add(mid, scale(perp(u), -this.px(9) * Math.sign(perp(u).y || 1))), text, uprightAngle(u), 'dim-text', 11)}</g>`;
   }
 
-  renderPreview() {
+  renderPreview(analysis) {
     const out = [];
     const c = this.cursor;
     const sw = this.px(1);
@@ -1418,17 +2341,58 @@ export class PlanView {
       const a = add(center, scale(u, -c.opening.width / 2));
       const b = add(center, scale(u, c.opening.width / 2));
       out.push(tag('line', { class: `preview-opening${c.opening.blocked ? ' blocked' : ''}`, x1: a.x, y1: a.y, x2: b.x, y2: b.y, 'stroke-width': w.thickness + this.px(4) }, null));
-      const off = scale(perp(u), -(w.thickness / 2 + this.px(18)));
-      const L1 = dist(A, a);
-      const L2 = dist(b, B);
-      if (L1 > 1) out.push(this.dimensionLine(add(A, off), add(a, off), formatLength(L1, this.units, { precision: 'label' }), 'preview-dim'));
-      if (L2 > 1) out.push(this.dimensionLine(add(b, off), add(B, off), formatLength(L2, this.units, { precision: 'label' }), 'preview-dim'));
+      const spans = wallFaceSpans(analysis, w.id, c.opening.offset, c.opening.width);
+      if (spans.length) {
+        out.push(this.faceGapDims(spans, 'preview-dim'));
+      } else {
+        const off = scale(perp(u), -(w.thickness / 2 + this.px(18)));
+        const L1 = dist(A, a);
+        const L2 = dist(b, B);
+        if (L1 > 1) out.push(this.dimensionLine(add(A, off), add(a, off), formatLength(L1, this.units, { precision: 'label' }), 'preview-dim'));
+        if (L2 > 1) out.push(this.dimensionLine(add(b, off), add(B, off), formatLength(L2, this.units, { precision: 'label' }), 'preview-dim'));
+      }
     }
-    if (c?.p && (this.tool === 'wall' || this.tool === 'rect')) {
+    if (c?.p && (this.tool === 'wall' || this.tool === 'rect' || this.tool === 'measure')) {
       const r = this.px(c.kind === 'node' ? 6 : 4);
       out.push(tag('circle', { class: `snap snap-${c.kind ?? 'none'}`, cx: c.p.x, cy: c.p.y, r, 'stroke-width': this.px(1.5) }, null));
     }
     return out.join('');
+  }
+
+  /** Pinned measurements (the latest strongest), the one being drawn, and the wall face under the mouse. */
+  renderMeasures() {
+    if (this.tool !== 'measure') return '';
+    const out = this.measures.map((m, i) => this.measureSvg(m, i === this.measures.length - 1 ? 'measure' : 'measure old'));
+    const m = this.measuring;
+    if (m && dist(m.a, m.b) > 1) out.push(this.measureSvg({ kind: 'line', a: m.a, b: m.b }, 'measure live'));
+    else if (m) out.push(tag('circle', { class: 'measure-end', cx: m.a.x, cy: m.a.y, r: this.px(3) }, null));
+    else if (this.measureHover) out.push(this.measureSvg(this.faceMeasure(this.measureHover), 'measure hover'));
+    return out.join('');
+  }
+
+  measureSvg(m, cls) {
+    const fmt = (v) => formatLength(v, this.units, { precision: 'label' });
+    const L = dist(m.a, m.b);
+    const sw = this.px(1);
+    if (m.kind === 'face') {
+      const off = scale(m.side, this.px(16));
+      const ext = (p) => tag('line', { class: 'measure-ext', x1: p.x, y1: p.y, x2: p.x + off.x * 1.3, y2: p.y + off.y * 1.3, 'stroke-width': sw }, null);
+      return `<g class="${cls}">${tag('line', { class: 'measure-face', x1: m.a.x, y1: m.a.y, x2: m.b.x, y2: m.b.y, 'stroke-width': this.px(3) }, null)}${ext(m.a)}${ext(m.b)}${
+        this.dimensionLine(add(m.a, off), add(m.b, off), `${fmt(L)} ${m.exterior ? 'exterior' : 'interior'}`, 'measure-dim')}</g>`;
+    }
+    let body = '';
+    const dx = Math.abs(m.b.x - m.a.x);
+    const dy = Math.abs(m.b.y - m.a.y);
+    if (dx > 1 && dy > 1) {
+      // Diagonal: dashed legs with the horizontal and vertical components.
+      const c = { x: m.b.x, y: m.a.y };
+      body += tag('polyline', { class: 'measure-leg', points: pts([m.a, c, m.b]), 'stroke-width': sw, 'stroke-dasharray': `${n(this.px(4))} ${n(this.px(3))}` }, null);
+      body += this.label(add(scale(add(m.a, c), 0.5), { x: 0, y: this.px(m.b.y > m.a.y ? -9 : 9) }), fmt(dx), 0, 'measure-leg-text', 10);
+      body += this.label(add(scale(add(c, m.b), 0.5), { x: this.px(m.b.x > m.a.x ? 9 : -9), y: 0 }), fmt(dy), -90, 'measure-leg-text', 10);
+    }
+    body += this.dimensionLine(m.a, m.b, fmt(L), 'measure-dim');
+    for (const p of [m.a, m.b]) body += tag('circle', { class: 'measure-end', cx: p.x, cy: p.y, r: this.px(2.5) }, null);
+    return `<g class="${cls}">${body}</g>`;
   }
 
   renderOverlay(level) {
@@ -1454,7 +2418,9 @@ export class PlanView {
       const s = this.toScreen(anchor);
       out.push(this.canvas.typedSvg(s.x, s.y, this.typed, this.tool === 'rect' ? 'interior W x D' : 'length'));
     }
-    out.push(this.canvas.messageSvg(this.message));
+    // While placing: what is wrong with the spot under the mouse.
+    const ghostIssue = this.placing?.shown ? this.lastGhostIssue : null;
+    out.push(this.canvas.messageSvg(this.message || ghostIssue || ''));
     return out.join('');
   }
 }
@@ -1497,6 +2463,40 @@ function boundsOf(poly) {
     minY: Math.min(...poly.map((p) => p.y)),
     maxY: Math.max(...poly.map((p) => p.y)),
   };
+}
+
+/** Each wall's outline [A+, B+, B−, A−] by wall id: mitred where two walls meet, squared at junctions and free ends. */
+function wallOutlines(d, idx) {
+  const deg = nodeDegrees(d);
+  const byNode = new Map();
+  for (const w of d.walls) {
+    for (const id of [w.a, w.b]) {
+      if (!byNode.has(id)) byNode.set(id, []);
+      byNode.get(id).push(w);
+    }
+  }
+  const out = new Map();
+  for (const w of d.walls) {
+    const A = idx.nodes.get(w.a);
+    const B = idx.nodes.get(w.b);
+    const u = norm(sub(B, A));
+    const nrm = scale(perp(u), w.thickness / 2);
+    const endA = endCorners(A, u, w, byNode.get(w.a), idx, deg.get(w.a));
+    const endB = endCorners(B, scale(u, -1), w, byNode.get(w.b), idx, deg.get(w.b));
+    // At B the away-direction is reversed, so its "plus" side is the wall's minus side.
+    out.set(w.id, [endA.plus ?? add(A, nrm), endB.minus ?? add(B, nrm), endB.plus ?? sub(B, nrm), endA.minus ?? sub(A, nrm)]);
+  }
+  return out;
+}
+
+/** The two long sides of a wall outline, each as [p, q, outward unit normal]. */
+function outlineSides(poly) {
+  const c = scale(add(add(poly[0], poly[1]), add(poly[2], poly[3])), 0.25);
+  return [[poly[0], poly[1]], [poly[3], poly[2]]].map(([p, q]) => {
+    let side = perp(norm(sub(q, p)));
+    if (dot(side, sub(p, c)) < 0) side = scale(side, -1);
+    return [p, q, side];
+  });
 }
 
 /**

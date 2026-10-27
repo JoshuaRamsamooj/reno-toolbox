@@ -5,7 +5,7 @@
 // lengths and heights stay true at any zoom or pan. Trim is stored on the
 // design (see core/trim.js) and every edit goes through app.change or a
 // live drag, so it is all undoable.
-import { analyze } from '../core/model.js';
+import { analyze, doorStyle } from '../core/model.js';
 import { profileHeightAt } from '../core/ceiling.js';
 import { designFaces, faceKey, faceRef, findFace, parseFaceKey } from '../core/faces.js';
 import {
@@ -14,9 +14,10 @@ import {
 } from '../core/trim.js';
 import { TRIM_CATEGORIES, defaultProfile, getProfile, profileLabel } from '../core/trimCatalog.js';
 import { MM_PER_IN, areaUnit, areaValue, formatLength, lengthValue } from '../core/units.js';
-import { esc, n, wainscotMarksSvg } from './svg.js';
+import { doorMarksSvg, esc, n, wainscotMarksSvg } from './svg.js';
 import { field, h, lengthInput } from './dom.js';
 import { DrawingCanvas } from './canvas.js';
+import { RulerGuides } from './guides.js';
 import {
   SCOPE_LABELS, applyToScope, clearScope, faceSummary, packageApplier, packageManager, profilePicker, quickApply, quickRemove, removeFromScope,
   saveFaceAsPackage, trimLengthOpts,
@@ -28,8 +29,9 @@ const TYPABLE = /^[0-9.'"\/\- xXmMcC]$/;
 const HANDLE = 5; // px half-size
 
 export const FACE_TOOLS = {
-  select: { label: 'Select', key: 'V', hint: 'Click trim to select · drag to move, drag handles to resize or trim a run · Del deletes (Shift+Del: that kind from the whole room) · X removes the clicked piece of a run · arrows nudge (Shift = more) · type a value + Enter to set a selected rail, wainscot or box' },
+  select: { label: 'Select', key: 'V', hint: 'Click trim to select · drag to move, drag handles to resize or trim a run · Del deletes (Shift+Del: that kind from the whole room) · X removes the clicked piece of a run · arrows nudge (Shift = more) · type a value + Enter to set a selected rail, wainscot or box · drag from a ruler for a guide, Shift+drag a guide to pull another off it (type a distance + Enter)' },
   baseboard: { label: 'Baseboard', key: 'B', category: 'baseboard', hint: 'Click to run baseboard along the whole face (gaps at doors are automatic) · drag to draw a partial run' },
+  shoe: { label: 'Shoe', key: 'H', category: 'shoe', hint: 'Click to run shoe moulding (or quarter round) along the floor at the foot of the baseboard · gaps at doors and stops at casing like baseboard · drag for a partial run' },
   crown: { label: 'Crown', key: 'C', category: 'crown', hint: 'Click to run crown along the ceiling (follows slopes, gaps at bulkheads) · click inside a dashed tray outline for crown in the tray · drag for a partial run' },
   'chair-rail': { label: 'Chair rail', key: 'R', category: 'chair-rail', hint: 'Click at a height for a full-width rail (height = top edge, snaps to sills and heads) · drag for a partial run · or type a height like 36 + Enter' },
   casing: { label: 'Casing', key: 'O', hint: 'Click a door, window or opening to case it on this side of the wall' },
@@ -63,6 +65,9 @@ export class FaceEditor {
       svg: this.svg, app, units: () => this.units, yUp: true, minScale: 0.01, maxScale: 30, scale: 0.2,
       onView: () => this.renderCanvas(), fitLabel: 'Fit the face (F)',
     });
+    // Ruler guides, as on the plan; kept on the face's trim record in face coordinates (x = s, y = z).
+    this.selGuide = null;
+    this.rulers = this.rulerGuides();
     this.bindEvents();
     new ResizeObserver(() => this.renderCanvas()).observe(this.svg);
   }
@@ -193,12 +198,13 @@ export class FaceEditor {
   // -------------------------------------------------------------------------
   // Snapping
 
-  /** Edges worth snapping to: corners, floor, ceiling, openings, casing, bulkheads and other trim. */
-  snapTargets(excludeId) {
+  /** Edges worth snapping to: corners, floor, ceiling, openings, casing, bulkheads, other trim and (unless `guides` is false) ruler guides. */
+  snapTargets(excludeId, guides = true) {
     const c = this.ctx;
     const { face, resolved } = c;
     const s = [{ v: 0, label: 'corner' }, { v: face.length, label: 'corner' }, { v: face.length / 2, label: 'centre of wall' }];
     const z = [{ v: 0, label: 'floor' }];
+    if (guides) for (const g of this.faceGuides()) (g.axis === 'x' ? s : z).push({ v: g.v, label: 'guide' });
     for (const op of face.openings) {
       const name = OPENING_NAMES[op.opening.type];
       s.push({ v: op.s0, label: `${name} edge` }, { v: op.s1, label: `${name} edge` }, { v: (op.s0 + op.s1) / 2, label: `${name} centre` });
@@ -260,6 +266,54 @@ export class FaceEditor {
   }
 
   // -------------------------------------------------------------------------
+  // Ruler guides (guides.js does the work)
+
+  /** The open face's guides. */
+  faceGuides() {
+    const face = this.ctx?.face;
+    return (face && recordForFace(this.design, face)?.guides) || [];
+  }
+
+  rulerGuides() {
+    const fe = this;
+    return new RulerGuides(this.canvas, {
+      list: () => this.faceGuides(),
+      save: (label, fn) => this.app.change(label, (d) => {
+        const face = findFace(designFaces(d), this.app.trimFace);
+        if (!face) return;
+        const rec = ensureRecord(d, face);
+        rec.guides ??= [];
+        fn(rec.guides);
+      }),
+      // Everything the trim tools snap to (corners, floor, openings, casing, trim) is also a reference for typed distances.
+      targets: (axis) => {
+        if (!this.ctx?.face) return [];
+        const t = this.snapTargets(null, false);
+        return (axis === 'x' ? t.s : t.z).map((x) => ({ ...x, ref: true }));
+      },
+      parse: (text) => parseTrimLength(text, this.units),
+      get example() { return fe.units === 'metric' ? '450 or 1.2m' : '18 or 3\'6"'; },
+      canGrab: () => this.tool === 'select',
+      isSelected: (id) => this.selGuide === id,
+      select: (id) => {
+        this.selGuide = id;
+        this.sel = null;
+        this.app.inspector.render();
+      },
+      render: () => this.renderCanvas(),
+      flash: (msg) => this.flash(msg),
+    });
+  }
+
+  deleteGuide(id) {
+    this.app.change('Delete guide', (d) => {
+      for (const r of d.faceTrim) if (r.guides) r.guides = r.guides.filter((g) => g.id !== id);
+    });
+    this.selGuide = null;
+    this.app.refresh();
+  }
+
+  // -------------------------------------------------------------------------
   // Hit testing
 
   handles(r) {
@@ -267,7 +321,7 @@ export class FaceEditor {
     const it = r.item;
     const face = this.ctx.face;
     if (it.kind === 'run') {
-      const zAt = (s) => (it.category === 'baseboard' ? it.size / 2 : it.category === 'chair-rail' ? it.height - it.size / 2
+      const zAt = (s) => (it.category === 'baseboard' || it.category === 'shoe' ? it.size / 2 : it.category === 'chair-rail' ? it.height - it.size / 2
         : isTrayCrown(it) ? (face.tray?.top ?? 0) - it.size / 2 : profileHeightAt(face.profile, s) - it.size / 2);
       return [{ key: 'start', s: r.a, z: zAt(r.a) }, { key: 'end', s: r.b, z: zAt(r.b) }];
     }
@@ -337,7 +391,9 @@ export class FaceEditor {
   onPointerDown(e) {
     if (!this.ctx?.face) return;
     const p = this.toFace(e);
+    const scr = this.canvas.toWorld(e);
     this.svg.setPointerCapture(e.pointerId);
+    if (this.rulers.pointerDown(e, scr)) return;
     if (this.canvas.wantsPan(e, this.tool === 'pan')) {
       this.canvas.startPan(e);
       return;
@@ -353,6 +409,9 @@ export class FaceEditor {
         return;
       }
       const hit = this.hitItem(p);
+      // Off the trim, a guide under the mouse wins (Shift+drag pulls a copy off it).
+      if (!hit && this.rulers.grab(e, scr)) return;
+      this.selGuide = null;
       this.sel = hit ? { id: hit.r.item.id, seg: hit.seg } : null;
       if (hit && (hit.r.item.kind === 'box' || (hit.r.item.kind === 'run' && hit.r.item.category === 'chair-rail'))) {
         this.drag = { type: 'move', id: hit.r.item.id, orig: { ...hit.r.item }, start: p, sx: e.clientX, sy: e.clientY, moved: false };
@@ -376,7 +435,7 @@ export class FaceEditor {
       return;
     }
     const sp = this.snapPoint(p, { free });
-    if (tool === 'baseboard' || tool === 'crown' || tool === 'chair-rail' || tool === 'wainscot') {
+    if (tool === 'baseboard' || tool === 'shoe' || tool === 'crown' || tool === 'chair-rail' || tool === 'wainscot') {
       const tray = tool === 'crown' && this.inTray(p);
       this.drag = { type: 'draw-span', tool, tray, s0: sp.s, z: sp.z, cur: sp, sx: e.clientX, sy: e.clientY, moved: false };
     } else if (tool === 'box') {
@@ -391,6 +450,7 @@ export class FaceEditor {
     const p = this.toFace(e);
     const dr = this.drag;
     if (this.canvas.movePan(e)) return;
+    if (this.rulers.pointerMove(e, this.canvas.toWorld(e), !!dr)) return;
     if (dr && !dr.moved && Math.hypot(e.clientX - dr.sx, e.clientY - dr.sy) > 3) {
       dr.moved = true;
       if (dr.type === 'move' || dr.type === 'handle') this.app.beginLive();
@@ -474,7 +534,7 @@ export class FaceEditor {
     const dr = this.drag;
     this.drag = null;
     if (this.svg.hasPointerCapture(e.pointerId)) this.svg.releasePointerCapture(e.pointerId);
-    if (this.canvas.endPan() || !dr) return;
+    if (this.canvas.endPan() || this.rulers.pointerUp() || !dr) return;
     if (dr.type === 'move' || dr.type === 'handle') {
       if (dr.moved) this.app.endLive(dr.type === 'move' ? 'Move trim' : 'Resize trim');
       return;
@@ -546,8 +606,17 @@ export class FaceEditor {
 
   onKey(e) {
     if (!this.ctx?.face) return false;
+    // Ruler guides: a typed distance + Enter while dragging one, or straight after placing it.
+    if (this.rulers.key(e)) return true;
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key;
+    if (this.selGuide && !mod && !this.typed && (k === 'Delete' || k === 'Backspace' || k === 'Escape')) {
+      if (k === 'Escape') this.selGuide = null;
+      else this.deleteGuide(this.selGuide);
+      this.app.inspector.render();
+      this.renderCanvas();
+      return true;
+    }
     if (!mod && k.length === 1 && TYPABLE.test(k) && (this.typed || /[0-9.]/.test(k))) {
       this.typed += k;
       this.message = '';
@@ -687,6 +756,7 @@ export class FaceEditor {
   setTool(tool) {
     if (!FACE_TOOLS[tool]) return;
     this.tool = tool;
+    this.rulers.cancel();
     this.typed = '';
     this.message = '';
     this.drag = null;
@@ -818,6 +888,7 @@ export class FaceEditor {
     out.push(this.renderFaceDims(c));
     out.push(this.renderSelection(c));
     out.push(this.renderPreview(c, r));
+    out.push(this.canvas.rulerGuidesSvg());
     out.push(this.renderRulers(c, r));
     out.push(this.renderMessage(r));
     this.svg.innerHTML = out.join('');
@@ -866,10 +937,7 @@ export class FaceEditor {
       if (o.type === 'window') {
         out.push(`<line class="fe-sash" x1="${n(x)}" y1="${n(y + hh / 2)}" x2="${n(x + w)}" y2="${n(y + hh / 2)}"/>`);
       } else if (o.type === 'door') {
-        const hingeAtStart = op.forward === !o.flipX;
-        const hx = hingeAtStart ? x : x + w;
-        const lx = hingeAtStart ? x + w : x;
-        out.push(`<polyline class="fe-swing" points="${n(lx)},${n(y)} ${n(hx)},${n(y + hh / 2)} ${n(lx)},${n(y + hh)}"/>`);
+        out.push(doorMarksSvg(doorStyle(o), x, y, w, hh, op.forward === !o.flipX, 'fe'));
       }
       if (w > 40 && hh > 24) {
         const label = `${formatLength(o.width, u, { precision: 'label' })} × ${formatLength(o.height, u, { precision: 'label' })}`;
@@ -969,7 +1037,7 @@ export class FaceEditor {
       if (it.category === 'chair-rail' && r.pieces.length) out.push(this.vDim(this.X(r.pieces[0].s0) - 12, 0, it.height, `${fmt(it.height)} AFF`, 'end', 'fe-dim sel'));
       for (const cut of it.cuts ?? []) {
         const top = isTrayCrown(it) ? face.tray?.top ?? 0 : profileHeightAt(face.profile, cut.s0);
-        const [z0, z1] = it.category === 'baseboard' ? [0, it.size] : it.category === 'chair-rail' ? [it.height - it.size, it.height] : [top - it.size, top];
+        const [z0, z1] = it.category === 'baseboard' || it.category === 'shoe' ? [0, it.size] : it.category === 'chair-rail' ? [it.height - it.size, it.height] : [top - it.size, top];
         out.push(`<rect class="fe-cut" x="${n(this.X(cut.s0))}" y="${n(this.Y(z1))}" width="${n((cut.s1 - cut.s0) * this.view.scale)}" height="${n((z1 - z0) * this.view.scale)}"/>`);
       }
     } else if (it.kind === 'box') {
@@ -1020,7 +1088,7 @@ export class FaceEditor {
       const b = Math.max(dr.s0, dr.cur.s);
       const edge = dr.tray ? face.tray.edge : null;
       const [s0, s1] = dr.moved ? [a, b] : edge ? [Math.min(edge.s0, edge.s1), Math.max(edge.s0, edge.s1)] : [0, L];
-      const z = dr.tray ? [face.tray.top - size, face.tray.top] : dr.tool === 'baseboard' ? [0, size] : dr.tool === 'crown' ? [profileHeightAt(face.profile, s0) - size, profileHeightAt(face.profile, s0)]
+      const z = dr.tray ? [face.tray.top - size, face.tray.top] : dr.tool === 'baseboard' || dr.tool === 'shoe' ? [0, size] : dr.tool === 'crown' ? [profileHeightAt(face.profile, s0) - size, profileHeightAt(face.profile, s0)]
         : dr.tool === 'wainscot' ? [0, spec.height] : [dr.z - size, dr.z];
       out.push(band(s0, s1, z[0], z[1]));
       if (dr.moved) out.push(this.hChain([s0, s1], this.Y(z[1]) - 12, fmt, 'fe-dim sel'));
@@ -1037,7 +1105,7 @@ export class FaceEditor {
       if (tool === 'chair-rail') {
         out.push(band(0, L, cur.z - size, cur.z));
         out.push(text(this.X(cur.s) + 12, this.Y(cur.z) - 6, `${fmt(cur.z)} AFF (top of rail)`, 'fe-readout', 'start', true));
-      } else if (tool === 'baseboard') out.push(band(0, L, 0, size));
+      } else if (tool === 'baseboard' || tool === 'shoe') out.push(band(0, L, 0, size));
       else if (tool === 'crown' && this.inTray(this.cursorRaw)) {
         const t = face.tray;
         out.push(band(Math.min(t.edge.s0, t.edge.s1), Math.max(t.edge.s0, t.edge.s1), t.top - size, t.top));
@@ -1094,9 +1162,30 @@ export class FaceEditor {
         h('div', { class: 'button-row' }, h('button', { class: 'danger', onclick: () => clearScope(this.app, 'house', {}) }, 'Clear all trim')),
       );
     }
+    if (this.selGuide && !this.faceGuides().some((g) => g.id === this.selGuide)) this.selGuide = null;
+    if (this.selGuide) return this.guidePanel(c);
     const r = this.selectedResolved();
     if (r) return this.itemPanel(c, r);
     return this.facePanel(c);
+  }
+
+  /** A ruler guide on this face: which way it runs, where it is and the guides either side. */
+  guidePanel(c) {
+    const g = this.faceGuides().find((x) => x.id === this.selGuide);
+    const fmt = (v) => formatLength(v, this.units, { precision: 'label' });
+    const [before, after] = this.rulers.neighbours(g);
+    const vertical = g.axis === 'x';
+    const entry = this.rulers.entry?.id === g.id ? this.rulers.entry : null;
+    return h('div', { class: 'panel' },
+      h('div', { class: 'panel-kicker' }, `${vertical ? 'Vertical' : 'Horizontal'} guide · ${c.face.name}`),
+      h('div', { class: 'stats' },
+        vertical ? h('div', { class: 'stat' }, h('span', {}, 'From left corner'), h('strong', {}, fmt(g.v))) : h('div', { class: 'stat' }, h('span', {}, 'Above floor'), h('strong', {}, fmt(g.v))),
+        h('div', { class: 'stat' }, h('span', {}, `Guide ${vertical ? 'left' : 'below'}`), h('strong', {}, before == null ? '–' : fmt(g.v - before))),
+        h('div', { class: 'stat' }, h('span', {}, `Guide ${vertical ? 'right' : 'above'}`), h('strong', {}, after == null ? '–' : fmt(after - g.v)))),
+      entry?.ref ? h('p', { class: 'lvl-callout small' }, `Type a distance + Enter to place it that far from the ${entry.ref.label}. Bare numbers are ${this.units === 'metric' ? 'mm' : 'inches'}.`) : null,
+      h('p', { class: 'muted small' }, 'Trim snaps to guides. Drag to move it, Shift+drag to pull another guide off it, or drag it onto its ruler to delete it. Guides stay with this wall face.'),
+      h('div', { class: 'button-row' }, h('button', { class: 'danger', onclick: () => this.deleteGuide(g.id) }, 'Delete guide (Del)')),
+    );
   }
 
   facePanel(c) {
@@ -1120,6 +1209,7 @@ export class FaceEditor {
         : h('p', { class: 'muted small' }, 'Nothing yet. Pick a tool above the drawing, or add the defaults:'),
       h('div', { class: 'quick-apply' },
         h('button', { onclick: () => this.createSpan('baseboard', { full: true }) }, '+ Baseboard'),
+        h('button', { onclick: () => this.createSpan('shoe', { full: true }) }, '+ Shoe'),
         h('button', { onclick: () => this.createSpan('crown', { full: true }) }, '+ Crown'),
         face.tray?.edge ? h('button', { onclick: () => this.createSpan('crown', { full: true, placement: 'tray' }) }, '+ Tray crown') : null,
         h('button', { onclick: () => this.createSpan('chair-rail', { full: true, z: this.toolSpec('chair-rail').height }) }, '+ Chair rail'),

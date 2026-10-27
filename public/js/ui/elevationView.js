@@ -1,10 +1,10 @@
 // Interior elevations: every wall face of a room, drawn as seen from inside
 // the room, at a shared scale, with openings, ceiling profile and dimensions.
-import { analyze, roomElevations } from '../core/model.js';
+import { analyze, doorStyle, roomElevations } from '../core/model.js';
 import { CEILING_TYPES, profileArea, profileHeightAt } from '../core/ceiling.js';
 import { bandArea } from '../core/bulkhead.js';
 import { formatArea, formatLength } from '../core/units.js';
-import { esc, n, pts, wainscotMarksSvg } from './svg.js';
+import { doorMarksSvg, esc, n, pts, wainscotMarksSvg } from './svg.js';
 import { h, svgEl } from './dom.js';
 import { designFaces, faceRef, findFace } from '../core/faces.js';
 import { drawOrder, resolveFaceTrim } from '../core/trim.js';
@@ -30,7 +30,7 @@ export class ElevationView {
       g = o && analysis.rooms.find((x) => x.wallIds.includes(o.wallId));
     }
     if (!g && this.roomId) g = analysis.rooms.find((x) => x.room?.id === this.roomId);
-    return g ?? analysis.rooms[0] ?? null;
+    return g ?? analysis.rooms.find((x) => !x.dead) ?? analysis.rooms[0] ?? null;
   }
 
   render() {
@@ -146,12 +146,14 @@ function drawElevation(w, k, maxH, units, trim) {
       out.push(`<line class="el-sash" x1="${n(x + inset)}" y1="${n(y + hPx / 2)}" x2="${n(x + wPx - inset)}" y2="${n(y + hPx / 2)}"/>`);
       out.push(`<line class="el-sill" x1="${n(x - 4)}" y1="${n(y + hPx)}" x2="${n(x + wPx + 4)}" y2="${n(y + hPx)}"/>`);
     } else if (o.type === 'door') {
-      // Hinge side: the swing chevron points to the hinged jamb.
+      // Hinge side: the swing chevron points to the hinged jamb (sliding doors: an arrow to the side they open to).
       const hingeAtStart = op.forward === !o.flipX;
-      const hx = hingeAtStart ? x : x + wPx;
-      const lx = hingeAtStart ? x + wPx : x;
-      out.push(`<polyline class="el-swing" points="${n(lx)},${n(y)} ${n(hx)},${n(y + hPx / 2)} ${n(lx)},${n(y + hPx)}"/>`);
-      out.push(`<circle class="el-knob" cx="${n(lx + (hingeAtStart ? -6 : 6))}" cy="${n(Y(op.bottom + 36 * 25.4))}" r="2.2"/>`);
+      const style = doorStyle(o);
+      out.push(doorMarksSvg(style, x, y, wPx, hPx, hingeAtStart, 'el'));
+      if (style === 'single') {
+        const lx = hingeAtStart ? x + wPx : x;
+        out.push(`<circle class="el-knob" cx="${n(lx + (hingeAtStart ? -6 : 6))}" cy="${n(Y(op.bottom + 36 * 25.4))}" r="2.2"/>`);
+      }
     }
     const label = `${fmt(o.width)} × ${fmt(o.height)}`;
     const lx = x + wPx / 2;

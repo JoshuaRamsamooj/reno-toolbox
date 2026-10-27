@@ -10,6 +10,8 @@ import { MM_PER_IN, formatLength, unitDefaults } from './units.js';
 import { ceilingModel, defaultCeiling, profileHeightAt, resolveCeiling, trayOverWall, wallTopProfile } from './ceiling.js';
 import { bulkheadDefaults, faceBands, findBulkheadFace, resolveBulkheads } from './bulkhead.js';
 import { migrateRoomCrown, sanitizeFaceTrim, sanitizePackages, syncFaceTrim } from './trim.js';
+import { sanitizeFloorRuns, syncFloorRuns } from './flooring.js';
+import { sanitizeFurniture } from './furniture.js';
 
 export const EPS = 1; // mm: nodes closer than this are the same point
 const MIN_FACE_AREA = 10000; // mm²: anything smaller is a sliver, not a room
@@ -21,6 +23,15 @@ export function uid(prefix) {
 }
 
 export const OPENING_TYPES = { door: 'Door', window: 'Window', opening: 'Opening' };
+export const DOOR_STYLES = { single: 'Single swing', double: 'Double swing', sliding: 'Sliding (bypass)', pocket: 'Pocket', barn: 'Barn' };
+export const BARN_OVERLAP = 2 * MM_PER_IN; // barn door slabs lap the opening by this much on each side
+export const DIMENSION_MODES = { interior: 'Interior faces', both: 'Interior and exterior faces', off: 'Hidden' };
+
+/** A door's style (single swing for doors saved before styles existed); null for windows and openings. */
+export function doorStyle(o) {
+  if (o?.type !== 'door') return null;
+  return DOOR_STYLES[o.style] ? o.style : 'single';
+}
 
 export function createDesign(units = 'imperial') {
   const d = unitDefaults(units);
@@ -35,6 +46,9 @@ export function createDesign(units = 'imperial') {
     rooms: [],
     faceTrim: [],
     trimPackages: [],
+    floorRuns: [],
+    guides: [],
+    furniture: [],
   };
 }
 
@@ -50,6 +64,12 @@ export function migrateDesign(raw) {
   });
   d.faceTrim = sanitizeFaceTrim(d.faceTrim);
   d.trimPackages = sanitizePackages(d.trimPackages);
+  d.floorRuns = sanitizeFloorRuns(d.floorRuns);
+  // Ruler guides: { id, axis: 'x' (vertical line at x = v) | 'y' (horizontal line at y = v), v }.
+  d.guides = Array.isArray(d.guides) ? d.guides.filter((g) => g && typeof g.id === 'string' && (g.axis === 'x' || g.axis === 'y') && Number.isFinite(g.v)) : [];
+  d.furniture = sanitizeFurniture(d.furniture);
+  // Centreline dimensions were dropped: plans saved with them show interior faces.
+  if (!DIMENSION_MODES[d.settings.dimensionMode]) d.settings.dimensionMode = 'interior';
   d.rooms.forEach((r) => {
     r.ceiling = { ...defaultCeiling(), ...(r.ceiling ?? {}) };
     r.flooring ??= true;
@@ -148,8 +168,9 @@ export function addOpening(d, wallId, type, offset, overrides = {}) {
     width: defaults.width,
     height: defaults.height,
     sill: defaults.sill,
-    flipX: false, // door: hinge at the end of the opening nearer wall end B
-    flipY: false, // door: swings to the right of the wall direction A→B
+    flipX: false, // door: hinge (or the side it slides to) at the end of the opening nearer wall end B
+    flipY: false, // door: swings (or a barn door hangs) to the right of the wall direction A→B
+    ...(type === 'door' ? { style: 'single' } : {}),
     ...overrides,
   };
   d.openings.push(o);
@@ -373,6 +394,7 @@ export function normalize(d) {
   clampOpenings(d);
   syncRooms(d);
   if (d.faceTrim?.length) syncFaceTrim(d, analyze(d));
+  syncFloorRuns(d);
   return d;
 }
 
@@ -675,6 +697,8 @@ export function analyze(d) {
     rooms.push(g);
   }
   for (const g of rooms) {
+    // Dead space: an enclosed void (chase, boxed-in corner) that is drawn but not finished.
+    g.dead = g.room?.dead === true;
     for (const h of g.face.halfEdges) {
       const info = wallInfo.get(h.wall.id);
       info.roomSides ??= [null, null];
@@ -902,6 +926,72 @@ export function addBulkhead(d, roomId, wallId) {
   return bh;
 }
 
+/** Every wall face that runs along a wall: room faces (dead space included) and exterior faces. */
+export function facesOfWall(analysis, wallId) {
+  const faces = [];
+  for (const g of analysis.rooms) for (const f of g.walls) if (f.wallIds.includes(wallId)) faces.push({ ...f, room: g });
+  for (const f of analysis.exteriorFaces) if (f.wallIds.includes(wallId)) faces.push({ ...f, room: null });
+  return faces;
+}
+
+/**
+ * Where a stretch of a wall (centred `offset` from end A, `width` long) lands
+ * on each face along the wall, in face coordinates (from the face's left
+ * corner as seen facing it). `forward` is true when the face runs A→B.
+ * Gaps to the corners are s0 and length - s1.
+ */
+export function wallFaceSpans(analysis, wallId, offset, width) {
+  const w = analysis.idx.walls.get(wallId);
+  if (!w) return [];
+  const A = analysis.idx.nodes.get(w.a);
+  const wd = norm(sub(analysis.idx.nodes.get(w.b), A));
+  const center = add(A, scale(wd, offset));
+  return facesOfWall(analysis, wallId).map((face) => {
+    const c = dot(sub(center, face.P), face.dir);
+    return { face, s0: c - width / 2, s1: c + width / 2, forward: dot(wd, face.dir) > 0 };
+  });
+}
+
+/**
+ * Wall space a pocket or barn door needs beside its opening, and how much
+ * there is, on the side it slides to (the hinge side, flipX): a pocket runs
+ * inside the wall, so both faces must be clear of corners and other openings;
+ * a barn door hangs on one face (flipY) and its slab laps the opening by
+ * BARN_OVERLAP each side. Returns { need, have } or null for other doors.
+ */
+export function slideClearance(d, o, analysis = analyze(d)) {
+  const style = doorStyle(o);
+  if (style !== 'pocket' && style !== 'barn') return null;
+  const need = style === 'pocket' ? o.width : o.width + 2 * BARN_OVERLAP;
+  const w = analysis.idx.walls.get(o.wallId);
+  if (!w) return null;
+  const A = analysis.idx.nodes.get(w.a);
+  const nn = perp(norm(sub(analysis.idx.nodes.get(w.b), A)));
+  const side = o.flipY ? -1 : 1;
+  let have = Infinity;
+  for (const { face, s0, s1, forward } of wallFaceSpans(analysis, o.wallId, o.offset, o.width)) {
+    // The face on the door's side has the viewer on that side, looking into the wall.
+    if (style === 'barn' && dot(face.outward, nn) * side > 0) continue;
+    const toStart = forward !== !!o.flipX; // slides toward the face's left end
+    const others = face.openings.filter((op) => op.opening.id !== o.id);
+    const room = toStart
+      ? s0 - Math.max(0, ...others.filter((op) => op.s1 <= s0 + 1).map((op) => op.s1))
+      : Math.min(face.length, ...others.filter((op) => op.s0 >= s1 - 1).map((op) => op.s0)) - s1;
+    have = Math.min(have, room);
+  }
+  if (have === Infinity) {
+    // A wall with no faces (free-standing): measure along the centreline.
+    const L = wallLength(d, w, analysis.idx);
+    const others = d.openings.filter((x) => x.wallId === o.wallId && x.id !== o.id);
+    const a = o.offset - o.width / 2;
+    const b = o.offset + o.width / 2;
+    have = o.flipX
+      ? Math.min(L, ...others.filter((x) => x.offset - x.width / 2 >= b - 1).map((x) => x.offset - x.width / 2)) - b
+      : a - Math.max(0, ...others.filter((x) => x.offset + x.width / 2 <= a + 1).map((x) => x.offset + x.width / 2));
+  }
+  return { need, have: Math.max(0, have) };
+}
+
 // ---------------------------------------------------------------------------
 // Edit operations (call normalize() afterwards unless noted)
 
@@ -932,6 +1022,10 @@ export function deleteWall(d, wallId) {
 
 export function deleteNode(d, nodeId) {
   for (const w of d.walls.filter((x) => x.a === nodeId || x.b === nodeId)) deleteWall(d, w.id);
+}
+
+export function deleteGuide(d, guideId) {
+  d.guides = d.guides.filter((g) => g.id !== guideId);
 }
 
 export function deleteOpening(d, openingId) {

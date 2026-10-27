@@ -619,3 +619,50 @@ test('casing pieces meet at mitres: they tile the frame exactly, with no overlap
   assert.equal(leg[0].z, leg[1].z);
   assert.ok(!win.pieces.some((p) => p.part === 'bottom'));
 });
+
+test('shoe moulding: on the floor in front of the baseboard, gapped at doors and casing like it', () => {
+  const T = 4.5 * IN;
+  const d = room(T);
+  edit(d, (x) => addOpening(x, northWall(x).id, 'door', 6 * FT, { width: 32 * IN, height: 80 * IN }));
+  edit(d, (x) => applySpecs(x, scopeFaces(designFaces(x), 'house'), [{ category: 'baseboard' }, { category: 'shoe' }, { category: 'door-casing' }]));
+  const north = resolvedFace(d, 'North');
+  const shoe = north.items.find((r) => r.item.category === 'shoe');
+  const base = north.items.find((r) => r.item.category === 'baseboard');
+  assert.ok(shoe && getProfile(shoe.item.profileId)?.category === 'shoe');
+  near(shoe.item.size, 0.75 * IN); // the default ¾" shoe
+  // On the floor, ¾" high.
+  assert.ok(shoe.pieces.every((p) => p.poly.every((q) => q.z >= -0.01 && q.z <= 0.75 * IN + 0.01)));
+  // Same gaps as the baseboard: split by the door and stopped at the casing.
+  assert.equal(shoe.pieces.length, 2);
+  assert.deepEqual(shoe.pieces.map((p) => [Math.round(p.s0), Math.round(p.s1)]), base.pieces.map((p) => [Math.round(p.s0), Math.round(p.s1)]));
+  // Painted over the baseboard.
+  const order = drawOrder(north.items).map((r) => r.item.category);
+  assert.ok(order.indexOf('shoe') > order.indexOf('baseboard'));
+  // Its own line in the takeoff, in linear feet.
+  const t = computeTakeoff(d);
+  const line = t.materials.find((m) => m.category === 'Trim' && /^Shoe moulding/.test(m.label));
+  assert.ok(line && line.unit === 'lf');
+  near(lengthOf(north, 'shoe'), lengthOf(north, 'baseboard'));
+  // A kind of its own for packages and whole-room removal.
+  assert.ok(trimKindsOn(d, designFaces(d)).has('shoe'));
+  edit(d, (x) => applySpecs(x, scopeFaces(designFaces(x), 'house'), [{ category: 'shoe', remove: true }]));
+  assert.ok(!trimKindsOn(d, designFaces(d)).has('shoe') && trimKindsOn(d, designFaces(d)).has('baseboard'));
+});
+
+test('plan view: shoe moulding sits just in front of the baseboard, mitred at the corners', () => {
+  const T = 4.5 * IN;
+  const d = room(T);
+  edit(d, (x) => applySpecs(x, scopeFaces(designFaces(x), 'house'), [{ category: 'baseboard' }, { category: 'shoe' }]));
+  const depth = (item) => (item.category === 'shoe' ? 0.5 * IN : 0.75 * IN);
+  const shoe = planTrimBands(d, designFaces(d), depth).filter((b) => b.category === 'shoe');
+  assert.equal(shoe.length, 4);
+  // At the north-west inside corner (2¼", 2¼"): outer edges mitre ¾" out (the baseboard's face), inner edges 1¼" out.
+  const corner = { x: T / 2, y: T / 2 };
+  const at = (k) => shoe.flatMap((b) => b.poly).filter((p) => Math.hypot(p.x - corner.x - k, p.y - corner.y - k) < 0.01).length;
+  assert.equal(at(0.75 * IN), 2);
+  assert.equal(at(1.25 * IN), 2);
+  // Without baseboard it sits right against the wall.
+  edit(d, (x) => applySpecs(x, scopeFaces(designFaces(x), 'house'), [{ category: 'baseboard', remove: true }]));
+  const alone = planTrimBands(d, designFaces(d), depth).filter((b) => b.category === 'shoe');
+  assert.equal(alone.flatMap((b) => b.poly).filter((p) => Math.hypot(p.x - corner.x, p.y - corner.y) < 0.01).length, 2);
+});

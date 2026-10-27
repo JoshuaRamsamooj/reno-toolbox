@@ -1,5 +1,5 @@
 // Takeoff tab: material list, per-room quantities and estimate settings.
-import { COUNT_UNITS, computeTakeoff, resolveEstimate, takeoffToCsv } from '../core/takeoff.js';
+import { COUNT_UNITS, computeTakeoff, formatMoney, resolveEstimate, takeoffToCsv } from '../core/takeoff.js';
 import { MM_PER_FT, areaUnit, areaValue, formatLength, lengthValue } from '../core/units.js';
 import { checkbox, field, h, lengthInput, numberInput, select } from './dom.js';
 import { TRIM_CATEGORIES, getProfile, profileLabel } from '../core/trimCatalog.js';
@@ -28,13 +28,23 @@ export class TakeoffView {
     const aU = areaUnit(u);
     const lU = u === 'metric' ? 'm' : 'ft';
 
+    const p = t.pricing;
+    const money = (v) => formatMoney(v, p.currency);
+    const keys = t.materials.map((m) => m.key);
     const materials = h('table', { class: 'data' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Material'), h('th', { class: 'num' }, 'Quantity'), h('th', {}, 'Unit'), h('th', {}, 'Basis'))),
-      h('tbody', {}, t.materials.map((m) => h('tr', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'Material'), h('th', { class: 'num' }, 'Quantity'), h('th', {}, 'Unit'),
+        h('th', { class: 'num' }, 'Unit price'), h('th', { class: 'num' }, 'Total'), h('th', {}, 'Basis'))),
+      h('tbody', {}, t.materials.map((m, i) => h('tr', {},
         h('td', {}, h('span', { class: `cat cat-${m.category.toLowerCase()}` }, m.category), ' ', m.label),
         h('td', { class: 'num' }, COUNT_UNITS.has(m.unit) ? String(m.quantity) : m.quantity.toFixed(1)),
         h('td', {}, m.unit),
+        h('td', { class: 'num' }, this.priceInput(m, p.lines[i].unitPrice, p.currency, keys)),
+        h('td', { class: 'num' }, p.lines[i].cost == null ? h('span', { class: 'muted' }, '–') : money(p.lines[i].cost)),
         h('td', { class: 'muted small' }, m.detail)))),
+      h('tfoot', { class: 'price-foot' },
+        h('tr', {}, h('td', { colspan: 4 }, 'Subtotal', h('span', { class: 'muted small' }, ` · ${p.priced} of ${p.lines.length} lines priced`)), h('td', { class: 'num' }, money(p.subtotal)), h('td', {})),
+        h('tr', {}, h('td', { colspan: 4 }, `Tax (${p.taxRate}%)`, h('span', { class: 'muted small' }, ' · one rate for every line, set in Estimate settings')), h('td', { class: 'num' }, money(p.tax)), h('td', {})),
+        h('tr', { class: 'grand' }, h('td', { colspan: 4 }, 'Total'), h('td', { class: 'num' }, money(p.total)), h('td', {}))),
     );
 
     const cols = [
@@ -62,7 +72,7 @@ export class TakeoffView {
       h('div', { class: 'takeoff' },
         h('div', { class: 'takeoff-main' },
           h('div', { class: 'section-head' },
-            h('h2', {}, 'Material estimate'),
+            h('h2', {}, 'Material estimate', h('span', { class: 'estimate-total' }, t.pricing.priced ? ` · ${formatMoney(t.pricing.total, t.pricing.currency)} incl. tax` : '')),
             h('button', { onclick: () => this.downloadCsv(t) }, 'Export CSV'),
           ),
           h('div', { class: 'table-wrap' }, materials),
@@ -78,6 +88,64 @@ export class TakeoffView {
         this.settings(d),
       ),
     );
+    this.restoreFocus();
+  }
+
+  /**
+   * Unit price for one material line (per its own unit: sheet, sq ft, lf,
+   * bag, door...). Blank clears it. Enter or Tab moves to the next line's
+   * price, Shift+Tab to the previous, as in a spreadsheet.
+   */
+  priceInput(m, value, currency, keys) {
+    const input = h('input', {
+      type: 'text', class: 'price-input', inputmode: 'decimal', value: value == null ? '' : value.toFixed(2),
+      placeholder: '0.00', 'aria-label': `Unit price per ${m.unit}`, title: `Price per ${m.unit}`, dataset: { priceKey: m.key },
+    });
+    const commit = () => {
+      const raw = input.value.replace(/[^0-9.\-]/g, '');
+      const v = raw === '' ? null : Number(raw);
+      if (v != null && !(Number.isFinite(v) && v >= 0)) {
+        input.classList.add('invalid');
+        return;
+      }
+      if (v === value || (v != null && value != null && Math.abs(v - value) < 0.0001)) return;
+      this.app.change(v == null ? 'Clear unit price' : 'Unit price', (x) => {
+        x.estimate = { ...(x.estimate ?? {}) };
+        const prices = { ...(x.estimate.prices ?? {}) };
+        if (v == null) delete prices[m.key];
+        else prices[m.key] = Math.round(v * 10000) / 10000;
+        x.estimate.prices = prices;
+      });
+    };
+    const next = (step) => keys[keys.indexOf(m.key) + step] ?? null;
+    input.addEventListener('change', commit);
+    input.addEventListener('focus', () => {
+      if (this.pendingFocus === m.key) this.pendingFocus = null;
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') this.pendingFocus = next(e.shiftKey ? -1 : 1);
+      if (e.key === 'Enter') {
+        this.pendingFocus = next(1);
+        input.blur();
+        setTimeout(() => this.restoreFocus());
+      }
+      if (e.key === 'Escape') {
+        input.value = value == null ? '' : value.toFixed(2);
+        input.blur();
+      }
+    });
+    return h('span', { class: 'price-cell' }, h('span', { class: 'muted' }, currency), input);
+  }
+
+  /** After a re-render (or an Enter), put the cursor in the price field the user was moving to. */
+  restoreFocus() {
+    const key = this.pendingFocus;
+    if (!key) return;
+    const el = [...this.el.querySelectorAll('input.price-input')].find((x) => x.dataset.priceKey === key);
+    if (!el) return;
+    this.pendingFocus = null;
+    el.focus();
+    el.select();
   }
 
   /** Assigned trim per face: what's on each wall side, in each profile's estimate unit. */
@@ -117,7 +185,8 @@ export class TakeoffView {
     if (sheetKey === 'custom') sheetOptions.custom = 'Custom';
     return h('aside', { class: 'takeoff-settings' },
       h('h3', {}, 'Estimate settings'),
-      field('Flooring waste', numberInput(e.flooringWaste, (v) => set('Flooring waste', (x) => { x.flooringWaste = v; }), { min: 0, max: 100, suffix: '%' })),
+      field('Flooring waste', numberInput(e.flooringWaste, (v) => set('Flooring waste', (x) => { x.flooringWaste = v; }), { min: 0, max: 100, suffix: '%' }),
+        d.floorRuns.length ? 'For rooms without a flooring layout; each layout sets its own in the Flooring panel' : null),
       field('Drywall sheet', select(sheetKey, sheetOptions, (k) => set('Drywall sheet', (x) => {
         const [w, hh] = SHEETS[u][k];
         x.drywallSheet = u === 'metric' ? { w, h: hh } : { w: w * MM_PER_FT, h: hh * MM_PER_FT };
@@ -132,7 +201,21 @@ export class TakeoffView {
       field(`Paint coverage (${areaUnit(u)} per ${u === 'metric' ? 'litre' : 'gallon'})`, numberInput(e.paintCoverage[u], (v) => set('Paint coverage', (x) => {
         x.paintCoverage = { ...x.paintCoverage, [u]: Math.max(0.1, v) };
       }), { min: 0.1, step: u === 'metric' ? 0.5 : 10 })),
+      h('h3', {}, 'Pricing'),
+      field('Tax rate', numberInput(e.taxRate, (v) => set('Tax rate', (x) => { x.taxRate = Math.min(100, Math.max(0, v)); }), { min: 0, max: 100, step: 0.025, suffix: '%' }),
+        'Applied to every line'),
+      field('Currency symbol', this.currencyInput(e.currency, (v) => set('Currency', (x) => { x.currency = v; }))),
+      h('p', { class: 'muted small' }, 'Enter a unit price on each material line; totals use the quantity as listed, waste included. Prices are saved with the plan.'),
     );
+  }
+
+  currencyInput(value, onCommit) {
+    const input = h('input', { type: 'text', value, maxlength: 4, class: 'currency-input', 'aria-label': 'Currency symbol' });
+    input.addEventListener('change', () => {
+      const v = input.value.trim();
+      if (v !== value) onCommit(v);
+    });
+    return input;
   }
 
   downloadCsv(t) {

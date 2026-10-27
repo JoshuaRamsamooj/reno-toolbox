@@ -7,6 +7,7 @@ import { MM_PER_IN, formatLength, parseLength } from './units.js';
 /** What each category is for. `kind` decides how the editor places it. */
 export const TRIM_CATEGORIES = {
   baseboard: { label: 'Baseboard', kind: 'run' },
+  shoe: { label: 'Shoe moulding', kind: 'run' },
   crown: { label: 'Crown', kind: 'run' },
   'chair-rail': { label: 'Chair rail', kind: 'run' },
   'panel-moulding': { label: 'Wall / panel moulding', kind: 'panel' },
@@ -110,6 +111,7 @@ export function fallbackSize(category, units) {
   const metric = units === 'metric';
   const sizes = {
     baseboard: metric ? 90 : 5.25 * MM_PER_IN,
+    shoe: metric ? 18 : 0.75 * MM_PER_IN,
     crown: metric ? 90 : 3.625 * MM_PER_IN,
     'chair-rail': metric ? 65 : 2.5 * MM_PER_IN,
     'panel-moulding': metric ? 30 : 1.125 * MM_PER_IN,

@@ -65,3 +65,34 @@ test('materials apply waste and sheet sizes', () => {
   const floor = t.materials.find((m) => m.key === 'flooring');
   near(floor.quantity, 176);
 });
+
+test('unit prices and one tax rate give line totals, a subtotal, tax and a total', async () => {
+  const { priceMaterials, formatMoney, listedQuantity } = await import('../public/js/core/takeoff.js');
+  const d = twoRooms();
+  let t = computeTakeoff(d);
+  assert.equal(t.pricing.priced, 0);
+  assert.equal(t.pricing.total, 0);
+  const drywall = t.materials.find((m) => m.key === 'drywall');
+  const paint = t.materials.find((m) => m.key === 'paint');
+  d.estimate = { prices: { drywall: 14.98, paint: 42.5 }, taxRate: 13 };
+  t = computeTakeoff(d);
+  const p = t.pricing;
+  assert.equal(p.priced, 2);
+  const dw = p.lines[t.materials.indexOf(t.materials.find((m) => m.key === 'drywall'))];
+  near(dw.cost, Math.round(drywall.quantity * 14.98 * 100) / 100);
+  // Paint is priced on the quantity as listed (one decimal), so the line can be checked by hand.
+  const pt = p.lines[t.materials.findIndex((m) => m.key === 'paint')];
+  near(pt.cost, Math.round(listedQuantity(paint) * 42.5 * 100) / 100);
+  near(p.subtotal, dw.cost + pt.cost);
+  near(p.tax, Math.round(p.subtotal * 0.13 * 100) / 100);
+  near(p.total, p.subtotal + p.tax);
+  // Unpriced lines stay blank and cost nothing.
+  assert.ok(p.lines.filter((l) => l.unitPrice == null).every((l) => l.cost == null));
+  // CSV carries prices and the totals.
+  const csv = takeoffToCsv(d, t);
+  assert.match(csv, /Material,Quantity,Unit,Unit price,Total,Notes/);
+  assert.match(csv, new RegExp(`Tax \\(13%\\),,,,${p.tax.toFixed(2)}`));
+  assert.match(csv, new RegExp(`Total,,,,${p.total.toFixed(2)},\\$`));
+  assert.equal(formatMoney(1234.5, '€'), '€1,234.50');
+  assert.equal(priceMaterials(d, []).total, 0);
+});

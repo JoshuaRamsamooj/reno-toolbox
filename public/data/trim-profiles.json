@@ -1,6 +1,6 @@
 {
   "about": "Trim profile catalog. Add a profile by appending an entry: id (unique), name, category, widths (with units, e.g. \"3 1/4\\\"\" or \"70mm\"), unit (lf = linear feet/metres, sf = area, sheet = sheet count). Sheet goods also need sheetLength; their widths are the sheet widths. Optional: defaultWidth, default (true = preferred profile for its category), description, and for wall panelling a drawing pattern (beadboard, shiplap, board-batten or panel) with spacing (groove or batten spacing, with units).",
-  "categories": ["baseboard", "crown", "chair-rail", "panel-moulding", "door-casing", "window-casing", "window-stool", "window-apron", "window-sill"],
+  "categories": ["baseboard", "shoe", "crown", "chair-rail", "panel-moulding", "door-casing", "window-casing", "window-stool", "window-apron", "window-sill"],
   "profiles": [
     { "id": "base-colonial", "name": "Colonial baseboard", "category": "baseboard", "widths": ["3 1/4\"", "4 1/4\"", "5 1/4\""], "defaultWidth": "5 1/4\"", "unit": "lf", "default": true },
     { "id": "base-craftsman", "name": "Craftsman flat baseboard", "category": "baseboard", "widths": ["5 1/2\"", "7 1/4\""], "unit": "lf" },
@@ -11,6 +11,9 @@
     { "id": "crown-colonial", "name": "Colonial crown", "category": "crown", "widths": ["3 5/8\"", "5 1/4\"", "7 1/4\""], "unit": "lf" },
     { "id": "crown-cornice", "name": "Cornice", "category": "crown", "widths": ["90mm", "120mm", "150mm"], "unit": "lf" },
 
+    { "id": "shoe-standard", "name": "Shoe moulding", "category": "shoe", "widths": ["1/2\"", "3/4\""], "defaultWidth": "3/4\"", "unit": "lf", "default": true, "description": "Sits on the floor at the foot of the baseboard; the width is its height on the wall" },
+    { "id": "shoe-quarter-round", "name": "Quarter round", "category": "shoe", "widths": ["1/2\"", "3/4\""], "defaultWidth": "3/4\"", "unit": "lf" },
+    { "id": "shoe-scotia", "name": "Scotia / quadrant", "category": "shoe", "widths": ["12mm", "18mm"], "defaultWidth": "18mm", "unit": "lf" },
     { "id": "chair-colonial", "name": "Colonial chair rail", "category": "chair-rail", "widths": ["2 1/2\"", "3\""], "unit": "lf", "default": true },
     { "id": "chair-flat-cap", "name": "Flat cap chair rail", "category": "chair-rail", "widths": ["2 1/2\"", "3 1/2\""], "unit": "lf" },
     { "id": "dado-rail", "name": "Dado rail", "category": "chair-rail", "widths": ["58mm", "69mm"], "unit": "lf" },

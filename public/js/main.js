@@ -1,6 +1,7 @@
 // Application shell: owns the design, undo history, selection and
 // persistence, and wires the views together.
-import { createDesign, migrateDesign, newOpeningProblem, normalize, openingProblems, deleteNode, deleteOpening, deleteRoom, deleteWall } from './core/model.js';
+import { createDesign, migrateDesign, newOpeningProblem, normalize, openingProblems, deleteGuide, deleteNode, deleteOpening, deleteRoom, deleteWall } from './core/model.js';
+import { deleteFurniture } from './core/furniture.js';
 import { renderThumbnail } from './core/thumbnail.js';
 import { formatLength } from './core/units.js';
 import { api } from './api.js';
@@ -157,7 +158,7 @@ class App {
   }
 
   validateSelection() {
-    const lists = { wall: this.design.walls, node: this.design.nodes, opening: this.design.openings, room: this.design.rooms };
+    const lists = { wall: this.design.walls, node: this.design.nodes, opening: this.design.openings, room: this.design.rooms, guide: this.design.guides, furniture: this.design.furniture };
     const alive = this.selectedItems().filter((i) => lists[i.type]?.some((x) => x.id === i.id));
     this.selection = alive.length > 1 ? { type: 'multi', items: alive } : alive[0] ?? null;
   }
@@ -201,6 +202,7 @@ class App {
     this.selectMany([
       ...this.design.walls.map((w) => ({ type: 'wall', id: w.id })),
       ...this.design.openings.map((o) => ({ type: 'opening', id: o.id })),
+      ...(this.plan.furnitureVisible() ? this.design.furniture.map((f) => ({ type: 'furniture', id: f.id })) : []),
     ]);
   }
 
@@ -208,8 +210,8 @@ class App {
     const items = this.selectedItems();
     if (!items.length) return;
     // Rooms first (they look at the walls), then openings, walls and corners.
-    const order = { room: 0, opening: 1, wall: 2, node: 3 };
-    const ops = { wall: deleteWall, node: deleteNode, opening: deleteOpening, room: deleteRoom };
+    const order = { room: 0, opening: 1, wall: 2, node: 3, guide: 4, furniture: 5 };
+    const ops = { wall: deleteWall, node: deleteNode, opening: deleteOpening, room: deleteRoom, guide: deleteGuide, furniture: deleteFurniture };
     const sorted = [...items].sort((a, b) => order[a.type] - order[b.type]);
     const label = items.length > 1 ? `Delete ${items.length} items` : `Delete ${items[0].type}`;
     this.change(label, (d) => sorted.forEach((i) => ops[i.type](d, i.id)));
@@ -242,7 +244,11 @@ class App {
 
   /** Opens a wall face ({wallId, dir}) in the Trim tab's elevation editor. */
   openFace(ref) {
-    if (JSON.stringify(ref) !== JSON.stringify(this.trimFace)) this.faceEditor.sel = null;
+    if (JSON.stringify(ref) !== JSON.stringify(this.trimFace)) {
+      this.faceEditor.sel = null;
+      this.faceEditor.selGuide = null;
+      this.faceEditor.rulers.cancel();
+    }
     this.trimFace = ref;
     this.showTab('trim');
   }
@@ -256,6 +262,8 @@ class App {
       door: '<path d="M4 20h4V6M8 6a12 12 0 0 1 12 12" fill="none" stroke-width="2"/><path d="M3 20h18" stroke-width="2"/>',
       window: '<rect x="3" y="9" width="18" height="6" fill="none" stroke-width="2"/><path d="M3 12h18" stroke-width="1.5"/>',
       opening: '<path d="M3 12h5M16 12h5M8 8v8M16 8v8" stroke-width="2.5" fill="none"/>',
+      layout: '<rect x="3" y="4" width="10" height="13" rx="1.5" fill="none" stroke-width="2"/><path d="M3 8h10" stroke-width="1.5"/><rect x="15" y="12" width="6" height="8" rx="1" fill="none" stroke-width="1.8"/><path d="M15 15h6" stroke-width="1.4"/>',
+      measure: '<rect x="2" y="8" width="20" height="8" rx="1" fill="none" stroke-width="2"/><path d="M6 8v4M10 8v3M14 8v4M18 8v3" stroke-width="1.6" fill="none"/>',
       level: '<rect x="2" y="8" width="20" height="8" rx="2" fill="none" stroke-width="2"/><rect x="9.5" y="10" width="5" height="4" rx="1" stroke="none"/><path d="M7 8v3M17 8v3" stroke-width="1.5"/>',
       trim: '<path d="M3 4h18M3 20h18" stroke-width="2.5" fill="none"/><path d="M3 4v16" stroke-width="2" fill="none"/><rect x="8" y="8" width="9" height="8" fill="none" stroke-width="1.8"/>',
     };

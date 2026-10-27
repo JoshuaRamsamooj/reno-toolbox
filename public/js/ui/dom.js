@@ -27,9 +27,9 @@ export function field(label, control, hint) {
  * Text input that accepts any length notation and commits millimetres.
  * `value` may be null (shows placeholder, e.g. an inherited default).
  */
-export function lengthInput(value, units, onCommit, { placeholder, allowEmpty = false, min = 0, name, parse = parseLength, example } = {}) {
+export function lengthInput(value, units, onCommit, { placeholder, allowEmpty = false, min = 0, name, parse = parseLength, format = formatLength, example } = {}) {
   const input = h('input', {
-    type: 'text', class: 'length-input', value: value == null ? '' : formatLength(value, units),
+    type: 'text', class: 'length-input', value: value == null ? '' : format(value, units),
     placeholder: placeholder ?? '', spellcheck: false, autocomplete: 'off', name,
   });
   const commit = () => {
@@ -47,13 +47,13 @@ export function lengthInput(value, units, onCommit, { placeholder, allowEmpty = 
     }
     input.classList.remove('invalid');
     if (value == null || Math.abs(mm - value) > 0.01) onCommit(mm);
-    else input.value = formatLength(value, units);
+    else input.value = format(value, units);
   };
   input.addEventListener('change', commit);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') input.blur();
     if (e.key === 'Escape') {
-      input.value = value == null ? '' : formatLength(value, units);
+      input.value = value == null ? '' : format(value, units);
       input.classList.remove('invalid');
       input.blur();
     }

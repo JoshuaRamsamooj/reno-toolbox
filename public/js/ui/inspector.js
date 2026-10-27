@@ -1,15 +1,22 @@
 // Right-hand properties panel: edits whatever is selected in the plan, or
 // the design-wide settings when nothing is selected.
-import { addBulkhead, analyze, deleteNode, roomElevations, deleteOpening, deleteRoom, deleteWall, indexDesign, OPENING_TYPES, resolveRoomCeiling, setWallLength, wallLength } from '../core/model.js';
+import {
+  BARN_OVERLAP, DIMENSION_MODES, DOOR_STYLES, addBulkhead, analyze, deleteNode, doorStyle, facesOfWall, roomElevations, deleteOpening, deleteRoom, deleteWall,
+  indexDesign, OPENING_TYPES, resolveRoomCeiling, setWallLength, slideClearance, wallFaceSpans, wallLength,
+} from '../core/model.js';
 import { CEILING_TYPES } from '../core/ceiling.js';
 import { bulkheadDefaults } from '../core/bulkhead.js';
 import {
   COMPOUNDS, DEEP_GRIND, FLATNESS_SPECS, SPACING_OPTIONS, bagCoverage, connectedRooms, readingUnit, resolveLeveling, roomDoorways,
 } from '../core/leveling.js';
 import { MM_PER_IN, formatArea, formatDeviation, formatLength, formatLinear, unitDefaults } from '../core/units.js';
+import { dist } from '../core/geometry.js';
 import { checkbox, deviationInput, field, h, lengthInput, numberInput, select } from './dom.js';
 import { designFaces, faceRef } from '../core/faces.js';
 import { clearScope, faceSummary, packageApplier, packageManager, quickApply, quickRemove } from './trimPanels.js';
+import { floorPanel } from './floorPanel.js';
+import { furniturePanel, layoutPanel } from './layoutPanel.js';
+import { FLOOR_LAYERS, roomRun } from '../core/flooring.js';
 
 const LITRES_PER_CU_FT = 28.3168;
 
@@ -25,10 +32,17 @@ export class Inspector {
     let body;
     if (this.app.tab === 'trim') body = this.app.faceEditor.panel();
     else if (this.app.plan.tool === 'level') body = this.levelPanel(analysis);
+    else if (this.app.plan.tool === 'measure') body = this.measurePanel();
+    else if (this.app.plan.tool === 'layout' && (this.app.plan.placing || selection?.type !== 'furniture')) body = layoutPanel(this.app, analysis);
+    else if (selection?.type === 'furniture') body = furniturePanel(this.app, analysis, selection.id);
+    else if (this.app.plan.showFlooring && (!selection || (selection.type === 'room' && !analysis.rooms.find((g) => g.room?.id === selection.id)?.dead))) {
+      body = floorPanel(this.app, analysis);
+    }
     else if (selection?.type === 'room') body = this.roomPanel(analysis, selection.id);
     else if (selection?.type === 'wall') body = this.wallPanel(analysis, selection.id);
     else if (selection?.type === 'opening') body = this.openingPanel(analysis, selection.id);
     else if (selection?.type === 'node') body = this.nodePanel(selection.id);
+    else if (selection?.type === 'guide') body = this.guidePanel(selection.id);
     else if (selection?.type === 'multi') body = this.multiPanel(analysis, selection.items);
     this.el.replaceChildren(body ?? this.designPanel(analysis));
   }
@@ -62,8 +76,10 @@ export class Inspector {
       }, 'Apply to all existing walls'),
       field('Default ceiling height', lengthInput(d.settings.ceilingHeight, u, (mm) => this.edit('Ceiling height', (x) => { x.settings.ceilingHeight = mm; }), { min: 100 }),
         'Rooms without their own height use this'),
-      field('Plan dimensions', select(d.settings.dimensionMode, { interior: 'Interior faces (per room)', centerline: 'Wall centrelines', off: 'Hidden' },
-        (v) => this.edit('Dimension mode', (x) => { x.settings.dimensionMode = v; }))),
+      field('Plan dimensions', select(d.settings.dimensionMode, DIMENSION_MODES, (v) => this.edit('Dimension mode', (x) => { x.settings.dimensionMode = v; })),
+        'Face to face, as built: the length of each wall face to its corners'),
+      h('div', { class: 'fl-summary' }, h('span', { class: 'muted' }, 'Ruler guides: '), d.guides.length ? `${d.guides.length}` : 'none',
+        d.guides.length ? h('button', { class: 'link danger', onclick: () => this.edit('Clear guides', (x) => { x.guides = []; }) }, ' Clear all') : null),
       checkbox('Show trim on the plan', d.settings.showTrim !== false, (v) => this.edit(v ? 'Show trim' : 'Hide trim', (x) => { x.settings.showTrim = v; })),
       h('h3', {}, 'Trim (whole house)'),
       quickApply(this.app, {}, 'house', { tray: analysis.rooms.some((g) => resolveRoomCeiling(d, g.room).type === 'tray') }),
@@ -76,9 +92,13 @@ export class Inspector {
         h('li', {}, h('b', {}, 'Room tool (R): '), 'drag a rectangle, or click a corner and type the interior size, e.g. ', h('code', {}, u === 'metric' ? '3.6x4.2' : "12x10'6"), ' then Enter.'),
         h('li', {}, 'Start the next room on an existing corner. Shared walls merge automatically.'),
         h('li', {}, h('b', {}, 'Wall tool (W): '), 'click corners; type a length like ', h('code', {}, u === 'metric' ? '2.4' : "8'6"), ' + Enter to set each wall exactly. Ending on a wall or corner joins it.'),
-        h('li', {}, h('b', {}, 'Door (D), Window (N), Opening (O): '), 'click on a wall.'),
-        h('li', {}, 'Click a room to name it and set its ceiling height and profile.'),
+        h('li', {}, h('b', {}, 'Door (D), Window (N), Opening (O): '), 'click on a wall. Select a door to pick its style: single or double swing, sliding, pocket or barn.'),
+        h('li', {}, h('b', {}, 'Guides: '), 'drag from the top or left ruler onto the plan; walls and rooms snap to them. Shift+drag a guide to pull a second one off it and see the distance between them. Drag a guide back onto the ruler to remove it.'),
+        h('li', {}, h('b', {}, 'Measure (M): '), 'hover the side of a wall for its length, or drag between any two points.'),
+        h('li', {}, h('b', {}, 'Layout (U): '), 'place beds, sofas, tables, cabinets, fixtures and appliances from the catalog; clearances, door swings and the kitchen work triangle are checked as you go.'),
+        h('li', {}, 'Click a room to name it and set its ceiling height and profile, or mark an enclosed void as dead space.'),
         h('li', {}, h('b', {}, 'Trim tool (T): '), 'click the side of a wall to draw baseboard, casing, chair rail and panels on it.'),
+        h('li', {}, h('b', {}, 'Flooring (Shift+F): '), 'lay out plank, tile or subfloor per room, drag the pattern to place the first row, and get the boxes to buy.'),
         h('li', {}, 'Switch to ', h('b', {}, 'Elevations'), ', ', h('b', {}, 'Trim'), ' or ', h('b', {}, 'Takeoff'), ' at the top of the canvas.'),
       ),
       h('p', { class: 'muted small' }, 'Select several: drag a box or Shift+click; Ctrl+A selects all; Del deletes. Pan: P, right-drag, middle mouse or hold Space. Zoom: scroll wheel. Undo: Ctrl+Z.'),
@@ -119,6 +139,31 @@ export class Inspector {
       );
     }
 
+    const openingCount = g.walls.reduce((sum, w) => sum + w.openings.length, 0);
+    const deadToggle = checkbox('Dead space (enclosed, no access)', g.dead, (v) => editRoom(v ? 'Mark dead space' : 'Unmark dead space', (r) => {
+      if (v) r.dead = true;
+      else delete r.dead;
+    }));
+    if (g.dead) {
+      return h('div', { class: 'panel' },
+        h('div', { class: 'panel-kicker' }, 'Dead space'),
+        field('Name', nameInput),
+        h('div', { class: 'stats' },
+          stat('Area', formatArea(g.area, u)),
+          stat('Perimeter', formatLinear(g.perimeter, u)),
+          stat('Walls', g.walls.length),
+        ),
+        deadToggle,
+        h('p', { class: 'muted small' }, 'An enclosed void such as a chase or boxed-in corner. It is drawn hatched and left out of the takeoff: no flooring, wall or ceiling finish, trim or leveling.'),
+        openingCount ? h('p', { class: 'lvl-callout warn small' }, `It has ${openingCount} opening${openingCount > 1 ? 's' : ''}: dead space usually has walls on all sides and no way in.`) : null,
+        h('h3', {}, 'Inside dimensions'),
+        h('ul', { class: 'wall-list' }, g.walls.map((w, i) => h('li', {}, h('span', {}, `${i + 1}. ${w.compass}`), h('span', {}, formatLength(w.length, u))))),
+        h('div', { class: 'button-row' },
+          h('button', { class: 'danger', onclick: () => { this.edit('Delete room', (x) => deleteRoom(x, roomId)); this.app.select(null); } }, 'Delete'),
+        ),
+      );
+    }
+
     return h('div', { class: 'panel' },
       h('div', { class: 'panel-kicker' }, 'Room'),
       field('Name', nameInput),
@@ -127,12 +172,19 @@ export class Inspector {
         stat('Perimeter', formatLinear(g.perimeter, u)),
         stat('Walls', g.walls.length),
       ),
+      deadToggle,
+      openingCount ? null : h('p', { class: 'muted small' }, 'Walls on all sides and no doors or openings: if nothing gets in here, mark it as dead space to leave it out of the takeoff.'),
       h('h3', {}, 'Ceiling'),
       ...ceilingFields,
       h('h3', {}, 'Bulkheads'),
       ...this.bulkheadFields(g, editRoom),
-      h('h3', {}, 'Finishes'),
-      checkbox('Include in flooring estimate', room.flooring !== false, (v) => editRoom('Flooring', (r) => { r.flooring = v; })),
+      h('h3', {}, 'Flooring'),
+      ...Object.entries(FLOOR_LAYERS).map(([layer, label]) => {
+        const run = roomRun(d, roomId, layer);
+        return h('div', { class: 'fl-summary' }, h('span', { class: 'muted' }, `${label}: `), run ? run.name : 'none');
+      }),
+      h('div', { class: 'button-row' }, h('button', { onclick: () => this.app.plan.setFlooring(true) }, 'Lay out flooring (Shift+F)')),
+      roomRun(d, roomId, 'finish') ? null : checkbox('Include in the area-based flooring estimate', room.flooring !== false, (v) => editRoom('Flooring', (r) => { r.flooring = v; })),
       h('h3', {}, 'Trim'),
       ...this.roomTrimFields(g),
       h('h3', {}, 'Walls (interior faces)'),
@@ -219,25 +271,25 @@ export class Inspector {
     const info = analysis.wallInfo.get(wallId);
     const editWall = (label, fn) => this.edit(label, (x) => fn(x.walls.find((ww) => ww.id === wallId)));
 
-    const sides = info.roomSides
-      .filter(Boolean)
-      .filter((g, i, arr) => arr.indexOf(g) === i)
-      .map((g) => {
-        const face = g.walls.find((f) => f.wallIds.includes(wallId));
-        if (!face) return null;
-        return field(`${g.room?.name ?? 'Room'} side (${face.compass.toLowerCase()} wall)`, lengthInput(face.length, u, (mm) => {
-          this.edit('Wall length', (x) => setWallLength(x, wallId, L + (mm - face.length)));
-        }, { min: 1 }), face.wallIds.length > 1 ? 'Interior face spans several wall segments' : null);
-      });
+    // Face lengths (to the corners) on each side: what gets measured and built. Editing one stretches the plan like the centreline does.
+    const faces = facesOfWall(analysis, wallId);
+    const sides = faces.map((face, i) => {
+      const name = face.room ? `${face.room.dead ? 'Dead space' : face.room.room?.name ?? 'Room'} side (${face.compass.toLowerCase()} wall)` : `Exterior (${face.compass.toLowerCase()} face)`;
+      return field(name, lengthInput(face.length, u, (mm) => {
+        this.edit('Wall length', (x) => setWallLength(x, wallId, L + (mm - face.length)));
+      }, { min: 1, name: i === 0 ? 'wall-length' : undefined }), face.wallIds.length > 1 ? 'This face spans several wall segments' : null);
+    });
 
     const openings = d.openings.filter((o) => o.wallId === wallId);
     const wallFaces = designFaces(d, analysis).filter((f) => f.wallIds.includes(wallId));
+    const centreline = field('Centreline length', lengthInput(L, u, (mm) => this.edit('Wall length', (x) => setWallLength(x, wallId, mm)), { min: 1, name: sides.length ? undefined : 'wall-length' }));
     return h('div', { class: 'panel' },
       h('div', { class: 'panel-kicker' }, 'Wall'),
-      field('Centreline length', lengthInput(L, u, (mm) => this.edit('Wall length', (x) => setWallLength(x, wallId, mm)), { min: 1, name: 'wall-length' }),
-        'Changing a length moves end B and stretches everything beyond it'),
-      sides.length ? h('h3', {}, 'Interior face lengths') : null,
+      sides.length ? h('h3', {}, 'Face lengths') : null,
       ...sides,
+      sides.length ? null : centreline,
+      h('p', { class: 'muted small' }, 'Changing a length moves end B and stretches everything beyond it.'),
+      sides.length ? h('details', { class: 'packages' }, h('summary', {}, 'Centreline'), centreline) : null,
       h('h3', {}, 'Construction'),
       field('Thickness', lengthInput(w.thickness, u, (mm) => editWall('Wall thickness', (ww) => { ww.thickness = mm; }), { min: 1 })),
       field('Type', select(w.exterior ?? 'auto', {
@@ -268,25 +320,57 @@ export class Inspector {
     const editO = (label, fn) => this.edit(label, (x) => fn(x.openings.find((oo) => oo.id === openingId)));
     const fromA = o.offset - o.width / 2;
     const fromB = L - o.offset - o.width / 2;
+    const style = doorStyle(o);
+    // Gaps to the corners of each face the opening is in, as seen facing the wall from that side.
+    const spans = wallFaceSpans(analysis, o.wallId, o.offset, o.width);
+    const position = spans.length
+      ? spans.flatMap(({ face, s0, s1, forward }) => {
+        const shift = (ds) => editO('Move opening', (oo) => { oo.offset += forward ? ds : -ds; });
+        const name = face.room ? `${face.room.dead ? 'Dead space' : face.room.room?.name ?? 'Room'} side` : 'Exterior side';
+        return [
+          h('div', { class: 'field-label' }, `${name} (${face.compass.toLowerCase()} ${face.room ? 'wall' : 'face'})`),
+          h('div', { class: 'field-row' },
+            field('To left corner', lengthInput(s0, u, (mm) => shift(mm - s0))),
+            field('To right corner', lengthInput(face.length - s1, u, (mm) => shift(face.length - s1 - mm)))),
+        ];
+      })
+      : [
+        field('Gap from wall end A', lengthInput(fromA, u, (mm) => editO('Move opening', (oo) => { oo.offset = mm + oo.width / 2; }))),
+        field('Gap from wall end B', lengthInput(fromB, u, (mm) => editO('Move opening', (oo) => { oo.offset = L - mm - oo.width / 2; }))),
+      ];
+    const clearance = slideClearance(d, o, analysis);
+    const flips = {
+      single: [['⇆ Flip hinge side', 'Flip hinge', 'flipX'], ['⇅ Flip swing', 'Flip swing', 'flipY']],
+      double: [['⇅ Flip swing', 'Flip swing', 'flipY']],
+      sliding: [],
+      pocket: [['⇆ Pocket on the other side', 'Flip pocket side', 'flipX']],
+      barn: [['⇆ Slide the other way', 'Flip slide side', 'flipX'], ['⇅ Hang on the other face', 'Flip barn door face', 'flipY']],
+    }[style] ?? [];
     return h('div', { class: 'panel' },
-      h('div', { class: 'panel-kicker' }, OPENING_TYPES[o.type]),
+      h('div', { class: 'panel-kicker' }, style ? `${DOOR_STYLES[style]} door` : OPENING_TYPES[o.type]),
       field('Type', select(o.type, OPENING_TYPES, (v) => editO('Opening type', (oo) => {
         const def = unitDefaults(u)[v];
         oo.type = v;
         oo.height = def.height;
         oo.sill = def.sill;
       }))),
-      field('Width', lengthInput(o.width, u, (mm) => editO('Opening width', (oo) => { oo.width = mm; }), { min: 1 })),
+      style ? field('Style', select(style, DOOR_STYLES, (v) => {
+        this.app.plan.newDoorStyle = v;
+        editO('Door style', (oo) => { oo.style = v; });
+      }), 'New doors use the last style picked') : null,
+      field(style === 'double' ? 'Width (both leaves)' : style === 'sliding' ? 'Width (both panels)' : 'Width', lengthInput(o.width, u, (mm) => editO('Opening width', (oo) => { oo.width = mm; }), { min: 1 })),
       field('Height', lengthInput(o.height, u, (mm) => editO('Opening height', (oo) => { oo.height = mm; }), { min: 1 })),
       o.type === 'window' ? field('Sill height (floor to bottom)', lengthInput(o.sill, u, (mm) => editO('Sill height', (oo) => { oo.sill = mm; }))) : null,
+      clearance && clearance.have < clearance.need - 0.5 ? h('p', { class: 'lvl-callout warn small' },
+        style === 'pocket'
+          ? `The pocket needs ${formatLength(clearance.need, u, { precision: 'label' })} of clear wall beside the opening; there is only ${formatLength(clearance.have, u, { precision: 'label' })} before a corner or another opening.`
+          : `The barn door slab (${formatLength(o.width + 2 * BARN_OVERLAP, u, { precision: 'label' })}) needs that much clear wall beside the opening to slide open; there is only ${formatLength(clearance.have, u, { precision: 'label' })}.`) : null,
+      flips.length ? h('div', { class: 'button-row' }, flips.map(([text, label, key]) => h('button', { onclick: () => editO(label, (oo) => { oo[key] = !oo[key]; }) }, text))) : null,
       h('h3', {}, 'Position'),
-      field('Gap from wall end A', lengthInput(fromA, u, (mm) => editO('Move opening', (oo) => { oo.offset = mm + oo.width / 2; }))),
-      field('Gap from wall end B', lengthInput(fromB, u, (mm) => editO('Move opening', (oo) => { oo.offset = L - mm - oo.width / 2; }))),
-      h('p', { class: 'muted small' }, 'Measured along the wall centreline. Ends A and B are labelled on the plan when the wall is selected.'),
-      o.type === 'door' ? h('div', { class: 'button-row' },
-        h('button', { onclick: () => editO('Flip hinge', (oo) => { oo.flipX = !oo.flipX; }) }, '⇆ Flip hinge side'),
-        h('button', { onclick: () => editO('Flip swing', (oo) => { oo.flipY = !oo.flipY; }) }, '⇅ Flip swing'),
-      ) : null,
+      ...position,
+      h('p', { class: 'muted small' }, spans.length
+        ? 'Measured along each wall face to its corner, as seen facing the wall from that side.'
+        : 'Measured along the wall centreline. Ends A and B are labelled on the plan when the wall is selected.'),
       h('div', { class: 'button-row' },
         h('button', { onclick: () => this.app.select({ type: 'wall', id: o.wallId }) }, 'Select wall'),
         h('button', { class: 'danger', onclick: () => { this.edit('Delete opening', (x) => deleteOpening(x, openingId)); this.app.select(null); } }, 'Delete'),
@@ -306,7 +390,7 @@ export class Inspector {
     const editWalls = (label, fn) => this.edit(label, (x) => x.walls.filter((w) => wallIds.has(w.id)).forEach(fn));
     const typeOptions = { auto: 'Auto-detect', yes: 'Exterior – insulate', no: 'Interior – no insulation' };
     if (type == null) typeOptions[''] = 'Mixed';
-    const parts = [['wall', 'Walls'], ['opening', 'Openings'], ['room', 'Rooms'], ['node', 'Corners']].filter(([t]) => count(t));
+    const parts = [['wall', 'Walls'], ['opening', 'Openings'], ['room', 'Rooms'], ['node', 'Corners'], ['guide', 'Guides'], ['furniture', 'Furniture']].filter(([t]) => count(t));
     return h('div', { class: 'panel' },
       h('div', { class: 'panel-kicker' }, 'Multiple selection'),
       h('h2', {}, `${items.length} items selected`),
@@ -318,7 +402,9 @@ export class Inspector {
         h('button', { class: 'danger', onclick: () => this.app.deleteSelection() }, `Delete ${items.length} items`),
         h('button', { onclick: () => this.app.select(null) }, 'Clear selection'),
       ),
-      h('p', { class: 'muted small' }, 'Shift+click adds or removes items. Drag left→right to select what is fully inside the box, right→left to select anything it touches. Ctrl+A selects everything.'),
+      count('guide') && count('guide') < items.length ? h('button', { class: 'link', onclick: () => this.app.selectMany(items.filter((i) => i.type === 'guide')) }, 'Select only the guides') : null,
+      count('furniture') && count('furniture') < items.length ? h('button', { class: 'link', onclick: () => this.app.selectMany(items.filter((i) => i.type === 'furniture')) }, 'Select only the furniture') : null,
+      h('p', { class: 'muted small' }, 'Shift+click adds or removes items. Drag left→right to select what is fully inside the box, right→left to select anything it touches; either way the box picks the guides it crosses. Ctrl+A selects everything.'),
     );
   }
 
@@ -605,6 +691,54 @@ export class Inspector {
         : 'No compound needed at this target.'),
       ...warnings.map((w) => h('p', { class: 'lvl-callout warn small' }, w)),
     ];
+  }
+
+  /** Measure tool: the pinned measurements, newest last. */
+  measurePanel() {
+    const u = this.app.design.units;
+    const plan = this.app.plan;
+    const fmt = (v) => formatLength(v, u, { precision: 'label' });
+    const items = plan.measures.map((m, i) => {
+      const L = dist(m.a, m.b);
+      const dx = Math.abs(m.b.x - m.a.x);
+      const dy = Math.abs(m.b.y - m.a.y);
+      const detail = m.kind === 'face' ? `${m.exterior ? 'Exterior' : 'Interior'} face · ${m.where}` : dx > 1 && dy > 1 ? `${fmt(dx)} across × ${fmt(dy)} down` : dx > dy ? 'Horizontal' : 'Vertical';
+      return h('li', {},
+        h('div', {}, h('strong', {}, fmt(L)), h('div', { class: 'muted small' }, detail)),
+        h('button', { class: 'link danger', title: 'Remove', onclick: () => plan.removeMeasure(i) }, '✕'));
+    });
+    return h('div', { class: 'panel' },
+      h('div', { class: 'panel-kicker' }, 'Measure'),
+      items.length ? h('ol', { class: 'measure-list' }, items) : h('p', {}, 'Nothing measured yet.'),
+      items.length ? h('div', { class: 'button-row' }, h('button', { onclick: () => { plan.measures = []; plan.render(); this.render(); } }, 'Clear all (Esc)')) : null,
+      h('ul', { class: 'help' },
+        h('li', {}, h('b', {}, 'Wall faces: '), 'hover the side of any wall to see the length of that face (inside a room or outside the building), and click to pin it.'),
+        h('li', {}, h('b', {}, 'Point to point: '), 'drag, or click twice. Points snap to inside and outside corners, door and window jambs, wall faces and guides; straight and 45° measures stop on the wall face they reach, so a measure across a room gives its clear size.'),
+        h('li', {}, 'Shift frees the angle; S turns snapping off. Del removes the last measure.')),
+      h('p', { class: 'muted small' }, 'Measurements are not saved with the plan; they clear when you switch tools.'),
+    );
+  }
+
+  /** A ruler guide: which way it runs and the distance to the parallel guides either side. */
+  guidePanel(guideId) {
+    const d = this.app.design;
+    const g = d.guides.find((x) => x.id === guideId);
+    if (!g) return null;
+    const fmt = (v) => formatLength(v, d.units, { precision: 'label' });
+    const [before, after] = this.app.plan.rulers.neighbours(g);
+    const names = g.axis === 'x' ? ['left', 'right'] : ['above', 'below'];
+    return h('div', { class: 'panel' },
+      h('div', { class: 'panel-kicker' }, g.axis === 'x' ? 'Vertical guide' : 'Horizontal guide'),
+      h('div', { class: 'stats' },
+        stat(`Guide ${names[0]}`, before == null ? '–' : fmt(g.v - before)),
+        stat(`Guide ${names[1]}`, after == null ? '–' : fmt(after - g.v))),
+      this.app.plan.rulers.entry?.id === guideId && this.app.plan.rulers.entry.ref
+        ? h('p', { class: 'lvl-callout small' }, `Type a distance + Enter to place it that far from the ${this.app.plan.rulers.entry.ref.label}.`) : null,
+      h('p', { class: 'muted small' }, 'Drag to move it, Shift+drag to pull another guide off it, or drag it onto its ruler to delete it. Drag a box across several guides to select them together.'),
+      h('div', { class: 'button-row' },
+        h('button', { class: 'danger', onclick: () => this.app.deleteSelection() }, 'Delete guide (Del)'),
+        d.guides.length > 1 ? h('button', { class: 'link danger', onclick: () => { this.edit('Clear guides', (x) => { x.guides = []; }); this.app.select(null); } }, `Delete all ${d.guides.length} guides`) : null),
+    );
   }
 
   nodePanel(nodeId) {

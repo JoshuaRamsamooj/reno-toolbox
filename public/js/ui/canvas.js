@@ -3,7 +3,8 @@
 // panning never distort), wheel zoom about the cursor, panning (right or
 // middle drag, Space+drag or a Pan tool), an adaptive grid down to 1/16" or
 // 1 mm, rulers with cursor marks, snap guides, a message banner, the typed
-// value box, and the Snap / Grid / zoom / Fit controls.
+// value box, the Snap / Grid / zoom / Fit controls, and ruler guides
+// (guides.js: a RulerGuides attached to the canvas sets `canvas.guides`).
 //
 // World y grows downward on the plan and upward (height above the floor) on
 // a wall face; `yUp` picks which. Views keep their own content rendering and
@@ -36,6 +37,7 @@ export class DrawingCanvas {
     this.snapOn = true;
     this.gridOn = true;
     this.pan = null;
+    this.guides = null; // RulerGuides, when the view uses them
     svg.classList.add('draw-canvas');
     svg.addEventListener('contextmenu', (e) => e.preventDefault());
     svg.addEventListener('wheel', (e) => {
@@ -250,9 +252,11 @@ export class DrawingCanvas {
 
   /**
    * Top and left rulers with major labels, optional strong marks (e.g. a
-   * face's ends and the floor) and the cursor position.
+   * face's ends and the floor, plus every ruler guide) and the cursor position.
    */
   rulersSvg({ cursor = null, marks = { x: [], y: [] } } = {}) {
+    const gm = this.guides?.marks();
+    if (gm) marks = { x: [...(marks.x ?? []), ...gm.x], y: [...(marks.y ?? []), ...gm.y] };
     const u = this.units();
     const r = this.rect();
     const { minor, major } = this.steps();
@@ -300,6 +304,11 @@ export class DrawingCanvas {
       out.push(`<text class="cv-guide-text halo" x="${n(r.width - 8)}" y="${n(y - 4)}" text-anchor="end">${esc(`${gy.label} · ${fmt(gy.v)}`)}</text>`);
     }
     return out.join('');
+  }
+
+  /** Ruler guides (if the view uses them), drawn over the content and under the rulers. */
+  rulerGuidesSvg() {
+    return this.guides?.svg() ?? '';
   }
 
   /** Banner across the top of the canvas (hints and refusals). */

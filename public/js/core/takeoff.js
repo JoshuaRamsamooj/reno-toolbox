@@ -1,18 +1,20 @@
 // Quantity takeoff: turns the analysed plan into raw quantities per room and
 // a first-pass material list. Everything is computed in mm/mm² and converted
 // to the display system at the end.
-import { analyze, roomElevations, indexDesign, wallLength } from './model.js';
+import { BARN_OVERLAP, DOOR_STYLES, analyze, doorStyle, roomElevations, indexDesign, wallLength } from './model.js';
 import { profileArea, profileHeightAt } from './ceiling.js';
 import { lerp } from './geometry.js';
 import { bandArea, bulkheadSurfaces } from './bulkhead.js';
 import { analyzeLeveling, resolveCompound } from './leveling.js';
 import { designFaces } from './faces.js';
+import { BUY_UNITS, FLOOR_KINDS, FLOOR_PRESETS, layoutRun, runLayer } from './flooring.js';
 import { mergeTrimLines, trimTakeoff } from './trim.js';
+import { furnitureMaterials } from './furniture.js';
 import { TRIM_CATEGORIES, getProfile, profileLabel } from './trimCatalog.js';
-import { MM2_PER_FT2, MM2_PER_M2, MM_PER_FT, areaValue, areaUnit, lengthValue } from './units.js';
+import { MM2_PER_FT2, MM2_PER_M2, MM_PER_FT, areaValue, areaUnit, formatLength, lengthValue } from './units.js';
 
 /** Material units counted in whole pieces. */
-export const COUNT_UNITS = new Set(['sheets', 'bags']);
+export const COUNT_UNITS = new Set(['sheets', 'bags', 'boxes', 'panels', 'rolls', 'doors', 'ea']);
 
 export function estimateDefaults(units) {
   return {
@@ -25,13 +27,45 @@ export function estimateDefaults(units) {
     trimLength: units === 'metric' ? 4800 : 16 * MM_PER_FT,
     paintCoats: 2,
     paintCoverage: { imperial: 350, metric: 10 }, // sq ft per gallon, m² per litre
+    prices: {}, // unit price per material line, by line key
+    taxRate: 0, // %, one rate for every line
+    currency: '$',
   };
 }
 
 export function resolveEstimate(d) {
   const def = estimateDefaults(d.units);
   const e = d.estimate ?? {};
-  return { ...def, ...e, paintCoverage: { ...def.paintCoverage, ...(e.paintCoverage ?? {}) } };
+  return { ...def, ...e, paintCoverage: { ...def.paintCoverage, ...(e.paintCoverage ?? {}) }, prices: { ...(e.prices ?? {}) } };
+}
+
+/** A material line's quantity as listed (whole pieces, or one decimal), which is what gets priced. */
+export function listedQuantity(m) {
+  return COUNT_UNITS.has(m.unit) ? m.quantity : Math.round(m.quantity * 10) / 10;
+}
+
+const cents = (v) => Math.round(v * 100) / 100;
+
+/**
+ * Prices the material list: each line's listed quantity (waste included)
+ * times its unit price (design.estimate.prices, by line key; lines without
+ * a price cost nothing), then one tax rate on the subtotal.
+ */
+export function priceMaterials(d, materials) {
+  const e = resolveEstimate(d);
+  const lines = materials.map((m) => {
+    const unitPrice = Number.isFinite(e.prices[m.key]) ? e.prices[m.key] : null;
+    return { key: m.key, unitPrice, cost: unitPrice == null ? null : cents(listedQuantity(m) * unitPrice) };
+  });
+  const subtotal = cents(lines.reduce((sum, l) => sum + (l.cost ?? 0), 0));
+  const taxRate = Number.isFinite(e.taxRate) ? e.taxRate : 0;
+  const tax = cents((subtotal * taxRate) / 100);
+  return { lines, priced: lines.filter((l) => l.cost != null).length, subtotal, taxRate, tax, total: cents(subtotal + tax), currency: e.currency ?? '$' };
+}
+
+/** Money with the plan's currency symbol and two decimals, e.g. $1,234.50. */
+export function formatMoney(v, currency = '$') {
+  return `${v < 0 ? '−' : ''}${currency}${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function emptyQuantities() {
@@ -107,7 +141,8 @@ export function computeTakeoff(d) {
   const analysis = analyze(d);
   const idx = indexDesign(d);
   const trim = trimTakeoff(d, designFaces(d, analysis));
-  const rooms = analysis.rooms.map((g) => {
+  // Dead space is drawn but never finished: no floor, walls, ceiling, trim or leveling.
+  const rooms = analysis.rooms.filter((g) => !g.dead).map((g) => {
     const q = emptyQuantities();
     const elev = roomElevations(d, g);
     q.floorArea = g.area;
@@ -150,15 +185,48 @@ export function computeTakeoff(d) {
 
   const totals = emptyQuantities();
   for (const r of rooms) for (const k of Object.keys(totals)) totals[k] += r.q[k];
-  const flooredArea = rooms.filter((r) => r.flooring).reduce((s, r) => s + r.q.floorArea, 0);
+  // Rooms with a finish-floor layout are counted from it; the rest by area.
+  const floorRuns = (d.floorRuns ?? []).map((run) => layoutRun(d, run, { analysis }));
+  const laidOut = new Set((d.floorRuns ?? []).filter((run) => runLayer(run) === 'finish').flatMap((run) => run.roomIds));
+  const flooredArea = rooms.filter((r) => r.flooring && !laidOut.has(r.id)).reduce((s, r) => s + r.q.floorArea, 0);
 
+  const materials = [...materialList(d, totals, flooredArea, laidOut.size > 0), ...floorMaterials(d, floorRuns), ...trimMaterials(d, trim.totals), ...levelingMaterials(d, rooms), ...doorMaterials(d), ...furnitureMaterials(d, analysis)];
   return {
     rooms,
     totals,
     trim,
-    materials: [...materialList(d, totals, flooredArea), ...trimMaterials(d, trim.totals), ...levelingMaterials(d, rooms)],
+    floorRuns,
+    materials,
+    pricing: priceMaterials(d, materials),
     counts: countOpenings(d),
   };
+}
+
+/**
+ * One line per flooring run: boxes (or sheets, panels, rolls) from the
+ * layout's piece count with offcuts reused, plus the run's waste allowance.
+ */
+function floorMaterials(d, layouts) {
+  const u = d.units;
+  const aUnit = areaUnit(u);
+  const A = (mm2) => areaValue(mm2, u);
+  const L = (mm) => formatLength(mm, u, { precision: 'label' });
+  return layouts.filter((l) => l.pieces.length).map((l) => {
+    const r = l.run;
+    const m = l.material;
+    const kind = FLOOR_KINDS[r.kind];
+    const product = FLOOR_PRESETS[r.preset]?.name ?? `${kind.label} ${L(r.width)} × ${L(r.length)}`;
+    const pieces = `${m.order} ${kind.pieces} (${m.stock} from the layout + ${r.waste}% waste)`;
+    return {
+      key: `floor:${r.id}`,
+      category: r.layer === 'subfloor' ? 'Subfloor' : 'Flooring',
+      label: `${product} – ${r.name} (${l.region.geoms.map((g) => g.room.name).join(', ')})`,
+      quantity: m.boxes,
+      unit: BUY_UNITS[r.unit][1],
+      detail: `${r.perBox > 1 ? `${pieces}, ${r.perBox} per ${BUY_UNITS[r.unit][0]}` : pieces} · ${A(m.netArea).toFixed(1)} ${aUnit} covered, ${A(m.coverage).toFixed(1)} ${aUnit} bought`,
+      floor: { runId: r.id, pieces: m.order, netArea: m.netArea, coverage: m.coverage },
+    };
+  });
 }
 
 const TRIM_ORDER = Object.keys(TRIM_CATEGORIES);
@@ -229,13 +297,46 @@ function levelingMaterials(d, rooms) {
   return items;
 }
 
+const DOOR_HARDWARE = {
+  single: 'prehung or slab + hinges',
+  double: 'pair of leaves',
+  sliding: 'two bypass panels + track',
+  pocket: 'slab + pocket frame kit',
+  barn: 'slab + surface track',
+};
+
+/** Doors by style and size, with the hardware each style needs (barn track runs twice the slab width). */
+function doorMaterials(d) {
+  const L = (mm) => formatLength(mm, d.units, { precision: 'label' });
+  const groups = new Map();
+  for (const o of d.openings) {
+    const style = doorStyle(o);
+    if (!style) continue;
+    const key = `${style}|${Math.round(o.width)}|${Math.round(o.height)}`;
+    if (!groups.has(key)) groups.set(key, { style, width: o.width, height: o.height, count: 0 });
+    groups.get(key).count++;
+  }
+  const order = Object.keys(DOOR_STYLES);
+  return [...groups.values()]
+    .sort((p, q) => order.indexOf(p.style) - order.indexOf(q.style) || p.width - q.width)
+    .map((g) => {
+      const slab = g.style === 'barn' ? g.width + 2 * BARN_OVERLAP : g.width;
+      const extra = g.style === 'barn' ? ` (${L(slab)} slab, ${L(2 * slab)} track)` : g.style === 'double' ? ` (2 × ${L(g.width / 2)} leaves)` : '';
+      return {
+        key: `door:${g.style}:${Math.round(g.width)}:${Math.round(g.height)}`, category: 'Doors',
+        label: `${DOOR_STYLES[g.style]} door – ${L(g.width)} × ${L(g.height)}`,
+        quantity: g.count, unit: 'doors', detail: `${DOOR_HARDWARE[g.style]}${extra}`,
+      };
+    });
+}
+
 function countOpenings(d) {
   const c = { door: 0, window: 0, opening: 0 };
   for (const o of d.openings) c[o.type] = (c[o.type] ?? 0) + 1;
   return c;
 }
 
-function materialList(d, t, flooredArea) {
+function materialList(d, t, flooredArea, hasLayouts = false) {
   const e = resolveEstimate(d);
   const u = d.units;
   const A = (mm2) => areaValue(mm2, u);
@@ -255,11 +356,11 @@ function materialList(d, t, flooredArea) {
   const coverage = e.paintCoverage[u] * (u === 'metric' ? MM2_PER_M2 : MM2_PER_FT2);
 
   const items = [
-    {
-      key: 'flooring', category: 'Flooring', label: 'Flooring',
+    ...(hasLayouts && flooredArea <= 0 ? [] : [{
+      key: 'flooring', category: 'Flooring', label: hasLayouts ? 'Flooring – rooms without a layout' : 'Flooring',
       quantity: A(withWaste(flooredArea, e.flooringWaste)), unit: aUnit,
       detail: `${A(flooredArea).toFixed(1)} ${aUnit} net + ${e.flooringWaste}% waste`,
-    },
+    }]),
     {
       key: 'drywall', category: 'Drywall', label: `Drywall sheets (${sheetLabel})`,
       quantity: Math.ceil(withWaste(drywallArea, e.drywallWaste) / sheetArea - 1e-9), unit: 'sheets',
@@ -289,7 +390,7 @@ function materialList(d, t, flooredArea) {
   return items;
 }
 
-/** CSV export of the takeoff (rooms + materials). */
+/** CSV export of the takeoff (rooms, materials with prices and totals, trim by face). */
 export function takeoffToCsv(d, takeoff) {
   const u = d.units;
   const aU = areaUnit(u);
@@ -306,8 +407,18 @@ export function takeoffToCsv(d, takeoff) {
   for (const r of takeoff.rooms) rows.push(line(r.name, r.ceilingType, r.q));
   rows.push(line('TOTAL', '', takeoff.totals));
   rows.push([]);
-  rows.push(['Material', 'Quantity', 'Unit', 'Notes']);
-  for (const m of takeoff.materials) rows.push([m.label, m.quantity.toFixed(COUNT_UNITS.has(m.unit) ? 0 : 2), m.unit, m.detail]);
+  const pricing = takeoff.pricing ?? priceMaterials(d, takeoff.materials);
+  const money = (v) => (v == null ? '' : v.toFixed(2));
+  rows.push(['Material', 'Quantity', 'Unit', 'Unit price', 'Total', 'Notes']);
+  takeoff.materials.forEach((m, i) => {
+    const line = pricing.lines[i];
+    rows.push([m.label, m.quantity.toFixed(COUNT_UNITS.has(m.unit) ? 0 : 2), m.unit, money(line.unitPrice), money(line.cost), m.detail]);
+  });
+  if (pricing.priced) {
+    rows.push(['Subtotal', '', '', '', money(pricing.subtotal), `${pricing.priced} of ${pricing.lines.length} lines priced`]);
+    rows.push([`Tax (${pricing.taxRate}%)`, '', '', '', money(pricing.tax), '']);
+    rows.push(['Total', '', '', '', money(pricing.total), pricing.currency]);
+  }
   if (takeoff.trim?.lines.length) {
     rows.push([]);
     rows.push(['Trim by wall face', 'Item', `Length (${lU})`, `Area (${aU})`, 'Estimate unit']);

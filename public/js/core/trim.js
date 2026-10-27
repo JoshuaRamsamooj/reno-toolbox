@@ -1,4 +1,4 @@
-// Trim and panelling on wall faces: baseboard, crown and chair rail runs,
+// Trim and panelling on wall faces: baseboard, shoe moulding, crown and chair rail runs,
 // door and window casing, picture-frame boxes and wainscot panels.
 //
 // Trim is stored per wall face in design.faceTrim as
@@ -10,7 +10,7 @@
 // above the finished floor (AFF), both in mm.
 //
 // Items:
-//   run      { kind, category: baseboard|crown|chair-rail, profileId, size,
+//   run      { kind, category: baseboard|shoe|crown|chair-rail, profileId, size,
 //              height (chair rail: top edge AFF), start, end (null = face end),
 //              cuts: [{s0, s1}], placement (crown only: 'tray' = along the side
 //              of a tray ceiling above this wall) }   gaps at openings are derived
@@ -24,8 +24,10 @@ import { profileHeightAt } from './ceiling.js';
 import { MM_PER_IN, formatLength, parseLength } from './units.js';
 import { defaultProfile, fallbackSize, getProfile, profileLabel } from './trimCatalog.js';
 
-export const RUN_CATEGORIES = ['baseboard', 'crown', 'chair-rail'];
-export const PACKAGE_CATEGORIES = ['baseboard', 'crown', 'chair-rail', 'door-casing', 'window-casing', 'panel-moulding'];
+export const RUN_CATEGORIES = ['baseboard', 'shoe', 'crown', 'chair-rail'];
+export const PACKAGE_CATEGORIES = ['baseboard', 'shoe', 'crown', 'chair-rail', 'door-casing', 'window-casing', 'panel-moulding'];
+/** Runs on the floor: baseboard, and shoe moulding at its foot (`size` is the height on the wall). */
+const FLOOR_RUNS = new Set(['baseboard', 'shoe']);
 const MIN_PIECE = 1; // mm: shorter pieces are dropped
 const ITEM_KINDS = new Set(['run', 'casing', 'box', 'wainscot']);
 
@@ -149,7 +151,7 @@ export function makeWainscot(d, opts = {}) {
 
 export function itemLabel(item) {
   if (isTrayCrown(item)) return 'Tray crown';
-  if (item.kind === 'run') return { baseboard: 'Baseboard', crown: 'Crown', 'chair-rail': 'Chair rail' }[item.category];
+  if (item.kind === 'run') return { baseboard: 'Baseboard', shoe: 'Shoe moulding', crown: 'Crown', 'chair-rail': 'Chair rail' }[item.category];
   if (item.kind === 'casing') return item.category === 'window-casing' ? 'Window casing' : 'Door casing';
   if (item.kind === 'box') return 'Panel box';
   return 'Wainscot';
@@ -193,6 +195,9 @@ export function sanitizeFaceTrim(list) {
     .filter((r) => r && Array.isArray(r.wallIds) && finitePoint(r.outward) && finitePoint(r.p0) && finitePoint(r.p1) && Array.isArray(r.items))
     .map((r) => {
       r.items = r.items.filter(validItem);
+      // Ruler guides on the face (face coordinates: x = from the left corner, y = height).
+      if (Array.isArray(r.guides)) r.guides = r.guides.filter((g) => g && typeof g.id === 'string' && (g.axis === 'x' || g.axis === 'y') && Number.isFinite(g.v));
+      if (!r.guides?.length) delete r.guides;
       for (const it of r.items) if (it.kind === 'run') it.cuts = Array.isArray(it.cuts) ? it.cuts.filter((c) => Number.isFinite(c?.s0) && Number.isFinite(c?.s1)) : [];
       return r;
     });
@@ -290,7 +295,7 @@ export function openingEnvelopes(face, items, def) {
 }
 
 function runBand(face, item, s0, s1) {
-  if (item.category === 'baseboard') return [0, item.size];
+  if (FLOOR_RUNS.has(item.category)) return [0, item.size];
   if (item.category === 'chair-rail') return [item.height - item.size, item.height];
   const c = minProfile(face.profile, s0, s1);
   return [c - item.size, c];
@@ -526,9 +531,10 @@ function resolveWainscot(face, item, envelopes, units) {
 
 const DRAW_ORDER = { wainscot: 0, run: 1, box: 2, casing: 3 };
 
-/** Resolved items in paint order: wainscot panelling underneath, then runs, boxes and casing on top. */
+/** Resolved items in paint order: wainscot panelling underneath, then runs (shoe moulding over the baseboard), boxes and casing on top. */
 export function drawOrder(items) {
-  return [...items].sort((a, b) => DRAW_ORDER[a.item.kind] - DRAW_ORDER[b.item.kind]);
+  const rank = (r) => DRAW_ORDER[r.item.kind] + (r.item.category === 'shoe' ? 0.5 : 0);
+  return [...items].sort((a, b) => rank(a) - rank(b));
 }
 
 /** Every item on a face resolved into drawable, measurable pieces. */
@@ -664,33 +670,41 @@ function dedupeItems(items) {
  * Moved walls keep their trim; a face split by a new wall gives each piece
  * a copy clipped to it; faces merged by deleting a wall combine their trim;
  * casing goes when its opening does. Positions are shifted so trim stays put
- * in the real world when a face's left end moves.
+ * in the real world when a face's left end moves. The face's ruler guides
+ * travel the same way (height guides go to every piece of a split face).
  */
 export function syncFaceTrim(d, analysis = analyze(d)) {
   const faces = [...analysis.rooms.flatMap((g) => g.walls), ...analysis.exteriorFaces];
   const perFace = new Map();
   for (const rec of d.faceTrim ?? []) {
-    if (!rec.items?.length) continue;
+    if (!rec.items?.length && !rec.guides?.length) continue;
     const matches = matchFaces(faces, rec);
     matches.forEach((f, k) => {
       const shift = dot(sub(rec.p0, f.P), f.dir);
       const openingIds = new Set(d.openings.filter((o) => f.wallIds.includes(o.wallId)).map((o) => o.id));
       const items = rec.items.map((it) => moveItem(it, shift, f, matches.length > 1, openingIds)).filter(Boolean);
-      if (k > 0) items.forEach((it) => { it.id = uid('t'); });
-      if (!perFace.has(f)) perFace.set(f, { id: null, items: [] });
+      const guides = (rec.guides ?? [])
+        .map((g) => (g.axis === 'x' ? { ...g, v: g.v + shift } : { ...g }))
+        .filter((g) => g.axis === 'y' || matches.length === 1 || (g.v >= 0 && g.v <= f.length));
+      if (k > 0) [...items, ...guides].forEach((it) => { it.id = uid(it.axis ? 'g' : 't'); });
+      if (!perFace.has(f)) perFace.set(f, { id: null, items: [], guides: [] });
       const entry = perFace.get(f);
       if (k === 0) entry.id ??= rec.id;
       entry.items.push(...items);
+      entry.guides.push(...guides);
     });
   }
   const used = new Set();
   d.faceTrim = [];
   for (const [f, e] of perFace) {
     const items = dedupeItems(e.items);
-    if (!items.length) continue;
+    const guides = e.guides.filter((g, i) => !e.guides.slice(0, i).some((o) => o.axis === g.axis && Math.abs(o.v - g.v) < 0.5));
+    if (!items.length && !guides.length) continue;
     const id = e.id && !used.has(e.id) ? e.id : uid('f');
     used.add(id);
-    d.faceTrim.push({ id, wallIds: [...f.wallIds], outward: pt(f.outward), p0: pt(f.P), p1: pt(f.Q), items });
+    const rec = { id, wallIds: [...f.wallIds], outward: pt(f.outward), p0: pt(f.P), p1: pt(f.Q), items };
+    if (guides.length) rec.guides = guides;
+    d.faceTrim.push(rec);
   }
 }
 
@@ -819,13 +833,14 @@ export function describeSpec(spec, units) {
 // ---------------------------------------------------------------------------
 // Plan view
 
-const PLAN_CATEGORIES = new Set(['baseboard', 'crown']);
+const PLAN_CATEGORIES = new Set(['baseboard', 'shoe', 'crown']);
 
 /**
  * Trim as seen on the plan, in plan coordinates.
  *
- * Baseboard and crown: one band per piece, along the wall face (tray crown:
- * along the tray edge) and `depthOf(item)` mm deep into the room. Where
+ * Baseboard, shoe moulding and crown: one band per piece, along the wall
+ * face (tray crown: along the tray edge) and `depthOf(item)` mm deep into
+ * the room; shoe moulding sits in front of the face's baseboard, if any. Where
  * pieces of the same kind meet at a corner, both ends are cut on the corner
  * bisector, so they meet in a mitre instead of overlapping or running into
  * the wall; ends at door gaps stay square.
@@ -851,7 +866,9 @@ export function planTrimBands(d, faces, depthOf) {
       const b = { x: face.P.x + face.dir.x * s1, y: face.P.y + face.dir.y * s1 };
       return [a, b, { x: b.x + inward.x * depth, y: b.y + inward.y * depth }, { x: a.x + inward.x * depth, y: a.y + inward.y * depth }];
     };
-    for (const r of resolveFaceTrim(d, face, rec).items) {
+    const resolved = resolveFaceTrim(d, face, rec).items;
+    const base = resolved.find((r) => r.item.kind === 'run' && r.item.category === 'baseboard' && r.pieces.length);
+    for (const r of resolved) {
       if (r.item.kind === 'casing') {
         const it = r.item;
         const { s0: outerL, s1: outerR } = r.outer;
@@ -877,6 +894,7 @@ export function planTrimBands(d, faces, depthOf) {
       lines.push({
         group: `${r.item.category}:${tray ? 'tray' : face.kind}`, item: r.item, tray, dir: face.dir, inward: { x: -face.outward.x, y: -face.outward.y },
         start: at(lo), end: at(hi), lo, hi, at, depth: depthOf(r.item), pieces: r.pieces,
+        offset: r.item.category === 'shoe' && base ? depthOf(base.item) : 0,
       });
     }
   }
@@ -885,10 +903,14 @@ export function planTrimBands(d, faces, depthOf) {
   // The piece of the same kind that continues round the corner at point `corner`.
   const neighbour = (l, corner, atStart) => lines.find((o) => o !== l && o.group === l.group
     && (atStart ? near(o.end, corner) && reaches(o, o.hi) : near(o.start, corner) && reaches(o, o.lo)));
-  const innerLine = (l) => ({ p: { x: l.start.x + l.inward.x * l.depth, y: l.start.y + l.inward.y * l.depth }, d: l.dir });
-  const mitre = (l, o) => {
-    const a = innerLine(l);
-    const b = innerLine(o);
+  // The band's edge `outer` (its offset from the wall) or inner (offset + depth), as a line.
+  const edgeLine = (l, outer) => {
+    const k = outer ? l.offset : l.offset + l.depth;
+    return { p: { x: l.start.x + l.inward.x * k, y: l.start.y + l.inward.y * k }, d: l.dir };
+  };
+  const mitre = (l, o, outer = false) => {
+    const a = edgeLine(l, outer);
+    const b = edgeLine(o, outer);
     const den = a.d.x * b.d.y - a.d.y * b.d.x;
     if (Math.abs(den) < 1e-9) return null; // collinear: nothing to mitre
     const t = ((b.p.x - a.p.x) * b.d.y - (b.p.y - a.p.y) * b.d.x) / den;
@@ -896,19 +918,21 @@ export function planTrimBands(d, faces, depthOf) {
   };
   const out = [];
   for (const l of lines) {
-    const deep = (p) => ({ x: p.x + l.inward.x * l.depth, y: p.y + l.inward.y * l.depth });
+    const off = (p, k) => ({ x: p.x + l.inward.x * k, y: p.y + l.inward.y * k });
     for (const piece of l.pieces) {
-      const a = l.at(piece.s0);
-      const b = l.at(piece.s1);
-      let ia = deep(a);
-      let ib = deep(b);
+      let a = off(l.at(piece.s0), l.offset);
+      let b = off(l.at(piece.s1), l.offset);
+      let ia = off(l.at(piece.s0), l.offset + l.depth);
+      let ib = off(l.at(piece.s1), l.offset + l.depth);
       if (Math.abs(piece.s0 - l.lo) < 1) {
         const o = neighbour(l, l.start, true);
         ia = (o && mitre(l, o)) ?? ia;
+        if (l.offset) a = (o && mitre(l, o, true)) ?? a;
       }
       if (Math.abs(piece.s1 - l.hi) < 1) {
         const o = neighbour(l, l.end, false);
         ib = (o && mitre(l, o)) ?? ib;
+        if (l.offset) b = (o && mitre(l, o, true)) ?? b;
       }
       out.push({ category: l.item.category, part: 'run', tray: l.tray, item: l.item, poly: [a, b, ib, ia] });
     }

@@ -29,12 +29,13 @@ export function findFace(faces, ref) {
 
 /**
  * Every wall face in the plan: room faces (in room order, numbered as on the
- * Elevations tab) followed by exterior faces. Each carries `profile` (top of
+ * Elevations tab; none for dead space) followed by exterior faces. Each carries `profile` (top of
  * wall as [{s, z}]), `bands` (bulkheads) and `openings` in face coordinates.
  */
 export function designFaces(d, analysis = analyze(d)) {
   const faces = [];
   for (const g of analysis.rooms) {
+    if (g.dead) continue; // dead space is never finished, so its faces take no trim
     const elev = roomElevations(d, g);
     elev.walls.forEach((w, i) => faces.push({
       ...w,
@@ -91,6 +92,34 @@ function exteriorProfile(w, roomFaces, fallback) {
     return best > -Infinity ? best : nearest;
   };
   return [...stops].sort((a, b) => a - b).map((s) => ({ s, z: heightAt(s) }));
+}
+
+/**
+ * A face split at its openings, for chain dimensions: `walls` are the solid
+ * stretches between the corners and the opening edges (what gets measured
+ * on either side of a door), `openings` the spans the openings take.
+ * Openings that overlap (stacked windows) count as one span. In face
+ * coordinates, clamped to the face; pieces under 1 mm are dropped.
+ */
+export function faceRuns(face) {
+  const spans = face.openings
+    .map((op) => ({ s0: Math.max(0, op.s0), s1: Math.min(face.length, op.s1) }))
+    .filter((sp) => sp.s1 - sp.s0 > 1)
+    .sort((a, b) => a.s0 - b.s0);
+  const openings = [];
+  for (const sp of spans) {
+    const last = openings.at(-1);
+    if (last && sp.s0 <= last.s1) last.s1 = Math.max(last.s1, sp.s1);
+    else openings.push({ ...sp });
+  }
+  const walls = [];
+  let at = 0;
+  for (const sp of openings) {
+    if (sp.s0 - at > 1) walls.push({ s0: at, s1: sp.s0 });
+    at = sp.s1;
+  }
+  if (face.length - at > 1) walls.push({ s0: at, s1: face.length });
+  return { walls, openings };
 }
 
 /**

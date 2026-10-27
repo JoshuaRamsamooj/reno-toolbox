@@ -82,6 +82,7 @@ export function applyToScope(app, label, specs, scope, target) {
 /** Kinds of trim that can be taken off a whole room or house, by specKey. */
 export const TRIM_KINDS = {
   baseboard: { label: 'Baseboard', spec: { category: 'baseboard' } },
+  shoe: { label: 'Shoe moulding', spec: { category: 'shoe' } },
   crown: { label: 'Crown', spec: { category: 'crown' } },
   'crown-tray': { label: 'Tray crown', spec: { category: 'crown', placement: 'tray' } },
   'chair-rail': { label: 'Chair rail', spec: { category: 'chair-rail' } },
@@ -145,6 +146,7 @@ export function quickApply(app, target, scope, { tray = false } = {}) {
   const run = (label, specs) => () => applyToScope(app, label, specs, scope, target);
   return h('div', { class: 'quick-apply' },
     h('button', { onclick: run('Baseboard', [{ category: 'baseboard' }]) }, '+ Baseboard'),
+    h('button', { onclick: run('Shoe moulding', [{ category: 'shoe' }]), title: 'Shoe moulding (or quarter round) at the foot of the baseboard' }, '+ Shoe'),
     h('button', { onclick: run('Crown', [{ category: 'crown' }]) }, '+ Crown'),
     tray ? h('button', { onclick: run('Tray crown', [{ category: 'crown', placement: 'tray' }]), title: 'Crown along the sides of tray ceilings' }, '+ Tray crown') : null,
     h('button', { onclick: run('Chair rail', [{ category: 'chair-rail' }]) }, '+ Chair rail'),
