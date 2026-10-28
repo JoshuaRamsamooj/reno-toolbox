@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { addOpening, addRectangle, createDesign, normalize } from '../public/js/core/model.js';
-import { computeTakeoff, takeoffToCsv } from '../public/js/core/takeoff.js';
+import { computeTakeoff, netQuantity, takeoffToCsv } from '../public/js/core/takeoff.js';
 import { MM_PER_FT, MM_PER_IN, MM2_PER_FT2 } from '../public/js/core/units.js';
 
 const FT = MM_PER_FT;
@@ -60,10 +60,15 @@ test('materials apply waste and sheet sizes', () => {
   const d = twoRooms();
   const t = computeTakeoff(d);
   const drywall = t.materials.find((m) => m.key === 'drywall');
-  // (576 walls + 160 ceiling) × 1.12 / 32 = 25.76 → 26 sheets
+  // (576 walls + 160 ceiling) × 1.12 / 32 = 25.76 → 26 sheets; without waste 736 / 32 = 23
   assert.equal(drywall.quantity, 26);
+  assert.equal(drywall.net, 23);
   const floor = t.materials.find((m) => m.key === 'flooring');
   near(floor.quantity, 176);
+  near(floor.net, 160);
+  // Lines without a waste allowance are the same either way.
+  const paint = t.materials.find((m) => m.key === 'paint');
+  assert.equal(netQuantity(paint), paint.quantity);
 });
 
 test('unit prices and one tax rate give line totals, a subtotal, tax and a total', async () => {
@@ -90,9 +95,9 @@ test('unit prices and one tax rate give line totals, a subtotal, tax and a total
   assert.ok(p.lines.filter((l) => l.unitPrice == null).every((l) => l.cost == null));
   // CSV carries prices and the totals.
   const csv = takeoffToCsv(d, t);
-  assert.match(csv, /Material,Quantity,Unit,Unit price,Total,Notes/);
-  assert.match(csv, new RegExp(`Tax \\(13%\\),,,,${p.tax.toFixed(2)}`));
-  assert.match(csv, new RegExp(`Total,,,,${p.total.toFixed(2)},\\$`));
+  assert.match(csv, /Material,Without waste,Quantity,Unit,Unit price,Total,Notes/);
+  assert.match(csv, new RegExp(`Tax \\(13%\\),,,,,${p.tax.toFixed(2)}`));
+  assert.match(csv, new RegExp(`Total,,,,,${p.total.toFixed(2)},\\$`));
   assert.equal(formatMoney(1234.5, '€'), '€1,234.50');
   assert.equal(priceMaterials(d, []).total, 0);
 });

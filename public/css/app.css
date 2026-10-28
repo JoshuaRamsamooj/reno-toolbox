@@ -480,7 +480,7 @@ body:has(.lvl-palette:not([hidden])) .toast { bottom: 96px; } /* clear the Level
 .toast.error { background: var(--danger); }
 
 @media print {
-  .topbar, .toolbar, .tabs, .inspector, .statusbar, .elev-header button { display: none !important; }
+  .topbar, .toolbar, .tabs, .inspector, .statusbar, .elev-header button, .elev-header .cv-layer, .elev-header .cut-mode { display: none !important; }
   body { display: block; overflow: visible; background: #fff; }
   .main { display: block; }
   .view.scroll { overflow: visible; padding: 0; }
@@ -560,6 +560,62 @@ body:has(.lvl-palette:not([hidden])) .toast { bottom: 96px; } /* clear the Level
 .fe-trim.selected { stroke: var(--accent); stroke-width: 2.5; fill-opacity: 1; }
 .fe-trim.seg { stroke: #f59e0b; stroke-width: 3; }
 .fe-cut { fill: none; stroke: #dc2626; stroke-width: 1.2; stroke-dasharray: 4 3; }
+
+.el-junction, .fe-junction { fill: #c9ced6; stroke: var(--wall); stroke-width: 1; }
+.el-obstruction rect, .fe-obstruction rect { fill: rgba(107, 116, 128, 0.12); stroke: #6b7480; stroke-width: 1; stroke-dasharray: 5 3; }
+.fe-obstruction { pointer-events: none; }
+.el-obstruction-label, .fe-obstruction-label { font-size: 10px; fill: #4b5563; font-style: italic; }
+
+/* Notes (annotations) */
+.note-text { font-weight: 600; paint-order: stroke; stroke: rgba(255, 255, 255, 0.9); stroke-width: 3px; stroke-linejoin: round; vector-effect: non-scaling-stroke; white-space: pre; }
+.note-box { fill: rgba(255, 255, 255, 0.92); }
+.note line { stroke-linecap: round; }
+.note.ghost { opacity: 0.55; pointer-events: none; }
+.note-outline { fill: none; stroke: var(--accent); }
+.note-outline:not(.selected) { stroke-opacity: 0.5; }
+.note-handle { fill: #fff; stroke: var(--accent); }
+#plan[data-tool="annotate"] { cursor: crosshair; }
+.note-kinds { flex-wrap: wrap; }
+.note-kinds button { font-size: 12px; padding: 4px 9px; }
+.note-swatches { display: flex; gap: 6px; }
+.note-swatch { width: 24px; height: 24px; padding: 0; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--border); }
+.note-swatch.active { box-shadow: 0 0 0 2px var(--accent); }
+.note-input { width: 100%; font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; resize: vertical; }
+
+/* Trim cut plan: joins across the trim and the stick each length comes from */
+.cut-marks { pointer-events: none; }
+.cut-join { stroke: #e11d48; stroke-linecap: round; fill: none; }
+.cut-join-halo { stroke: #fff; stroke-linecap: round; fill: none; }
+path.cut-join { stroke-width: 2.2; }
+path.cut-join-halo { stroke-width: 4.5; }
+.cut-label { fill: #111827; font-weight: 700; font-variant-numeric: tabular-nums; paint-order: stroke; stroke: rgba(255, 255, 255, 0.92); stroke-width: 3px; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.cut-legend text { font-size: 11px; fill: #374151; font-variant-numeric: tabular-nums; }
+.cut-legend text.title { font-size: 12px; font-weight: 700; fill: #111827; }
+.cut-legend text.sub { font-size: 10px; fill: var(--muted); }
+.cut-legend text.code { font-weight: 700; fill: #be123c; }
+.cut-legend text.diff { font-weight: 600; fill: #1e3a8a; }
+.cut-legend-bg { fill: rgba(255, 255, 255, 0.95); stroke: var(--border); }
+.cut-legend.joins .cut-legend-bg { stroke: #93b4f5; }
+.check.disabled { opacity: 0.45; cursor: default; }
+.elev-cuts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: -6px 0 16px; }
+.elev-cuts .spacer { flex: 1; }
+.cut-chip strong, .cut-code { color: #be123c; font-weight: 700; }
+.cut-chip.has-joins { background: #ffe4e6; }
+.cut-diff.on { background: var(--accent-soft); color: #1e3a8a; }
+.cut-code { display: inline-block; min-width: 20px; font-variant-numeric: tabular-nums; }
+.cut-mode button { font-size: 12px; padding: 3px 10px; }
+.cut-head { margin-top: 26px; }
+.cut-table .nowrap { white-space: nowrap; }
+.cut-table th.current, .cut-table td.current { background: var(--accent-soft); }
+.stock-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.stock-cell input { width: 76px; }
+.cut-table .cut-name { min-width: 170px; }
+.cut-table .cut-diff-cell { text-align: right; }
+.cut-table .cut-diff-cell div { white-space: nowrap; }
+.cut-list { margin: 6px 0; }
+.cut-list summary { cursor: pointer; padding: 4px 0; }
+.cut-list table { margin: 4px 0 10px; }
+.cut-cuts { list-style: none; margin: 0; padding: 0; }
 .fe-handle { fill: #fff; stroke: var(--accent); stroke-width: 1.6; cursor: grab; }
 .fe-handle.hover { fill: var(--accent); }
 .fe-ghost { fill: var(--accent); fill-opacity: 0.18; stroke: var(--accent); stroke-dasharray: 4 3; stroke-width: 1; pointer-events: none; }

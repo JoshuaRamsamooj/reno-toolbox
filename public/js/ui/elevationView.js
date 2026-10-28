@@ -6,8 +6,10 @@ import { bandArea } from '../core/bulkhead.js';
 import { formatArea, formatLength } from '../core/units.js';
 import { doorMarksSvg, esc, n, pts, wainscotMarksSvg } from './svg.js';
 import { h, svgEl } from './dom.js';
-import { designFaces, faceRef, findFace } from '../core/faces.js';
+import { designFaces, faceKey, faceRef, faceTitle, findFace } from '../core/faces.js';
 import { drawOrder, resolveFaceTrim } from '../core/trim.js';
+import { faceCutMarks } from '../core/trimCuts.js';
+import { compareCuts, cutMarksSvg, cutToggles, differenceText } from './cutPlan.js';
 
 const VW = 640;
 
@@ -47,11 +49,15 @@ export class ElevationView {
     const roomSelect = h('select', { class: 'room-select' }, analysis.rooms.map((r) => h('option', { value: r.room?.id ?? '', selected: r === g }, r.room?.name ?? 'Room')));
     roomSelect.addEventListener('change', () => this.app.select({ type: 'room', id: roomSelect.value }));
 
-    const maxLen = Math.max(...elev.walls.map((w) => w.length), 1);
-    const maxH = Math.max(elev.model.maxHeight, ...elev.walls.flatMap((w) => w.profile.map((p) => p.z)));
+    // The room's walls, then the sides and ends of any stub walls in it.
+    const faceList = [...elev.walls, ...elev.spurs];
+    const maxLen = Math.max(...faceList.map((w) => w.length), 1);
+    const maxH = Math.max(elev.model.maxHeight, ...faceList.flatMap((w) => w.profile.map((p) => p.z)));
     const k = Math.min((VW - 130) / maxLen, 300 / maxH);
     const net = elev.walls.reduce((s, w) => s + faceNet(w), 0);
     const faces = designFaces(d, analysis);
+    const cuts = this.app.trimCuts();
+    const showCuts = this.app.showTrimCuts && cuts.plan.groups.length > 0;
 
     this.el.replaceChildren(
       h('div', { class: 'elev-header' },
@@ -62,28 +68,57 @@ export class ElevationView {
         h('span', { class: 'chip' }, `Walls net ${formatArea(net, u)}`),
         elev.bulkheads.length ? h('span', { class: 'chip bh' }, `${elev.bulkheads.length} bulkhead${elev.bulkheads.length > 1 ? 's' : ''}`) : null,
         h('span', { class: 'spacer' }),
+        cuts.plan.groups.length ? cutToggles(this.app) : null,
         h('button', { onclick: () => window.print() }, 'Print'),
       ),
-      h('div', { class: 'elev-grid' }, elev.walls.map((w, i) => this.card(d, g, elev, w, i, k, maxH, faces))),
+      ...(showCuts ? [this.cutSummary(g, cuts)] : []),
+      h('div', { class: 'elev-grid' }, faceList.map((w, i) => this.card(d, g, elev, w, i, k, maxH, faces, showCuts ? cuts : null))),
     );
   }
 
-  card(d, g, elev, w, i, k, maxH, faces) {
+  /**
+   * The cut plan for this room (sticks and joins in each trim it uses, in the
+   * plan the estimate uses) and, for the whole house, what fewest joins changes.
+   */
+  cutSummary(g, cuts) {
+    const mode = cuts.mode;
+    const roomId = g.room?.id ?? null;
+    const chips = [];
+    for (const grp of cuts.plan.groups) {
+      const pieces = grp.pieces.filter((p) => p.roomId === roomId);
+      if (!pieces.length) continue;
+      const segs = grp.plans[mode].segments;
+      const sticks = new Set(pieces.flatMap((p) => (segs.get(p.id) ?? []).map((sg) => sg.stick)));
+      const joins = pieces.reduce((s, p) => s + Math.max(0, (segs.get(p.id)?.length ?? 1) - 1), 0);
+      const word = grp.kind === 'sheet' ? 'seam' : 'join';
+      chips.push(h('span', { class: `chip cut-chip${joins ? ' has-joins' : ''}`, title: `Lengths of stock this room's ${grp.code} trim comes from (some are shared with other rooms)` },
+        h('strong', {}, grp.code), ` ${sticks.size} ${grp.kind === 'sheet' ? 'panel' : grp.kind === 'boards' ? 'board' : 'stick'}${sticks.size === 1 ? '' : 's'} · ${joins} ${word}${joins === 1 ? '' : 's'}`));
+    }
+    const diff = differenceText(compareCuts(cuts));
+    return h('div', { class: 'elev-cuts' },
+      h('span', { class: 'muted small' }, `Cut plan (${mode === 'joins' ? 'fewest joins' : 'least material'}):`),
+      chips.length ? chips : h('span', { class: 'muted small' }, 'no trim in this room'),
+      h('span', { class: 'spacer' }),
+      h('span', { class: `chip cut-diff${mode === 'joins' ? ' on' : ''}` }, mode === 'joins' ? `Whole house vs least material: ${diff}` : `Fewest joins would be: ${diff}`));
+  }
+
+  card(d, g, elev, w, i, k, maxH, faces, cuts) {
     const u = d.units;
     const selectWall = () => this.app.select({ type: 'wall', id: w.wallIds[0] });
     const face = findFace(faces, faceRef(w));
     const trim = face ? resolveFaceTrim(d, face) : null;
+    const marks = cuts && face ? faceCutMarks(cuts.plan, cuts.mode, faceKey(faceRef(face))) : null;
     return h('figure', { class: 'elev-card' },
       h('figcaption', {},
         h('div', {},
-          h('strong', {}, `${i + 1}. ${w.compass} wall`),
+          h('strong', {}, faceTitle(w, i + 1)),
           h('span', { class: 'muted' }, ` · ${formatLength(w.length, u)} · net ${formatArea(faceNet(w), u)}${w.exterior ? ' · exterior' : ''}`),
         ),
         h('div', { class: 'elev-actions' },
           h('button', { onclick: () => this.app.openFace(faceRef(w)) }, trim?.items.length ? 'Edit trim' : 'Add trim'),
           h('button', { class: 'keyplan', title: 'Select this wall', onclick: selectWall }, svgEl(keyPlan(g, w)))),
       ),
-      svgEl(drawElevation(w, k, maxH, u, trim)),
+      svgEl(drawElevation(w, k, maxH, u, trim, marks)),
     );
   }
 }
@@ -114,7 +149,7 @@ function keyPlan(g, w) {
     `<circle cx="${n(eye.x)}" cy="${n(eye.y)}" r="2" class="kp-dot"/></svg>`;
 }
 
-function drawElevation(w, k, maxH, units, trim) {
+function drawElevation(w, k, maxH, units, trim, cutMarks) {
   const L = w.length;
   const x0 = 70;
   const top = 34;
@@ -164,6 +199,12 @@ function drawElevation(w, k, maxH, units, trim) {
     }
   }
 
+  // Stub walls meeting this face: the wall runs out toward the viewer here, so trim stops either side.
+  for (const j of w.junctions ?? []) {
+    const ss = [j.s0, ...w.profile.map((p) => p.s).filter((s) => s > j.s0 && s < j.s1), j.s1];
+    out.push(`<polygon class="el-junction" points="${pts([{ x: X(j.s0), y: Y(0) }, { x: X(j.s1), y: Y(0) }, ...ss.reverse().map((s) => ({ x: X(s), y: Y(profileHeightAt(w.profile, s)) }))])}"/>`);
+  }
+
   // Bulkheads: hatched band from the underside up to the ceiling line.
   for (const b of w.bands) {
     const ss = [b.s0, ...w.profile.map((p) => p.s).filter((s) => s > b.s0 && s < b.s1), b.s1];
@@ -191,6 +232,9 @@ function drawElevation(w, k, maxH, units, trim) {
     out.push(vDim(X(L) + 16, Y(0), yt, fmt(t.top), 'el-dim', 'start'));
   }
 
+  // Cabinets and fixtures against the wall that trim stops at (see trimObstructions).
+  for (const ob of trim?.obstructions ?? []) out.push(obstructionSvg(ob, X, Y, w.profile));
+
   // Trim drawn on this face in the Trim tab, wainscot first so it never hides the baseboard.
   for (const r of drawOrder(trim?.items ?? [])) {
     for (const p of r.pieces) {
@@ -198,9 +242,11 @@ function drawElevation(w, k, maxH, units, trim) {
       const d = rings.map((ring) => `M${ring.map((q) => `${n(X(q.s))} ${n(Y(q.z))}`).join('L')}Z`).join('');
       const pat = p.marks ? ` pat-${p.marks.pattern}` : '';
       out.push(`<path class="el-trim tc-${r.item.kind === 'wainscot' ? 'wainscot' : r.item.category}${pat}" fill-rule="evenodd" d="${d}"/>`);
-      if (p.marks) out.push(wainscotMarksSvg(p.marks, X, Y, k));
+      // With the cut plan shown, its seams replace the evenly spaced sheet seams.
+      if (p.marks) out.push(wainscotMarksSvg(cutMarks ? { ...p.marks, lines: p.marks.lines.filter((l) => l.kind !== 'seam') } : p.marks, X, Y, k));
     }
   }
+  if (cutMarks) out.push(cutMarksSvg(cutMarks, X, Y, k));
 
   // Heights: at each end and at any peak in the profile.
   const first = w.profile[0];
@@ -221,6 +267,15 @@ function drawElevation(w, k, maxH, units, trim) {
 
   const defs = '<defs><pattern id="bh-hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="7" height="7" fill="#fdf3e4"/><line x1="0" y1="0" x2="0" y2="7" stroke="#e8b26a" stroke-width="1.4"/></pattern></defs>';
   return `<svg class="elevation" viewBox="0 0 ${VW} ${n(VH)}" preserveAspectRatio="xMidYMid meet">${defs}${out.join('')}</svg>`;
+}
+
+/** A cabinet or fixture against the wall: its outline up to its height (or the ceiling), named. */
+export function obstructionSvg(ob, X, Y, profile, cls = 'el') {
+  const top = Math.min(ob.top, profileHeightAt(profile, (ob.s0 + ob.s1) / 2));
+  const [x0, x1, y0, y1] = [X(ob.s0), X(ob.s1), Y(ob.bottom), Y(top)];
+  const label = x1 - x0 > ob.name.length * 5 + 8 && y0 - y1 > 14
+    ? `<text class="${cls}-obstruction-label" x="${n((x0 + x1) / 2)}" y="${n((y0 + y1) / 2)}" text-anchor="middle" dominant-baseline="central">${esc(ob.name)}</text>` : '';
+  return `<g class="${cls}-obstruction"><rect x="${n(x0)}" y="${n(y1)}" width="${n(x1 - x0)}" height="${n(y0 - y1)}"><title>${esc(ob.name)}: no trim behind it</title></rect>${label}</g>`;
 }
 
 function hChain(stops, X, y, k, fmt) {

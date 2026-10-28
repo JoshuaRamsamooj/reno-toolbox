@@ -165,6 +165,15 @@ export function furniturePanel(app, analysis, id) {
       stat('Height', r.mount === 'rug' ? '–' : r.mount === 'overhead' ? `${fmt(r.z0)}–${fmt(r.h)}` : fmt(r.h)),
       stat('Takeoff', r.takeoff),
       r.seats ? stat('Seats', r.seats) : stat('Where', MOUNTS[r.mount])),
+    r.mount === 'rug' || r.mount === 'counter' ? null : h('div', { class: 'fu-trim' },
+      checkbox('No trim on the wall behind it', r.cutsTrim, (v) => editF(v ? 'Leave trim off behind' : 'Run trim behind', (it) => {
+        const catalog = !!(r.sizeDef?.cutsTrim ?? def.cutsTrim);
+        it.opts = { ...it.opts };
+        // Store only a choice that differs from the catalog, so catalog changes still reach the piece.
+        if (v === catalog) delete it.opts.cutsTrim;
+        else it.opts.cutsTrim = v;
+      })),
+      h('p', { class: 'muted small' }, `Baseboard, chair rail, crown and wainscot stop either side of it where it stands against a wall and is as high as them. ${(r.sizeDef?.cutsTrim ?? def.cutsTrim) ? 'Standard for built-in pieces like this one.' : 'Off as standard: trim usually runs behind a piece like this.'}`)),
     x?.issues.length ? h('ul', { class: 'fu-issues' }, x.issues.map((i) => h('li', { class: i.severity }, i.message))) : x && r.mount !== 'rug' ? h('p', { class: 'fu-ok small' }, '✓ Clear of walls, doors, windows and other pieces, with its clearances.') : null,
     h('h3', {}, 'Clear floor needed'),
     ...clearFields,

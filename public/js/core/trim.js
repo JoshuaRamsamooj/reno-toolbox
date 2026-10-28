@@ -12,10 +12,15 @@
 // Items:
 //   run      { kind, category: baseboard|shoe|crown|chair-rail, profileId, size,
 //              height (chair rail: top edge AFF), start, end (null = face end),
-//              cuts: [{s0, s1}], placement (crown only: 'tray' = along the side
-//              of a tray ceiling above this wall) }   gaps at openings are derived
+//              cuts: [{s0, s1}], omit: [key], placement (crown only: 'tray' = along
+//              the side of a tray ceiling above this wall) }   gaps at openings are
+//              derived; the run is split into pieces there, and `omit` lists pieces
+//              taken out by what bounds them ('start' | 'end' | 'opening:<id>' |
+//              'wall:<id>' | 'piece:<id>' | 'bulkhead:<id>', e.g. 'start|opening:o1'),
+//              so a removed piece follows its door; `cuts` are positional removals
 //   casing   { kind, category: door-casing|window-casing, openingId, profileId,
-//              size, reveal, stool, apron, sill }   (parts: {profileId, size, horn?} | null)
+//              size, reveal, stool, apron, sill, omit: ['left leg' | 'right leg' |
+//              'head' | 'bottom'] }   (parts: {profileId, size, horn?} | null)
 //   box      { kind, category: panel-moulding, profileId, size, s, z, w, h }
 //   wainscot { kind, category: panel-moulding, profileId, size, start, end, height }
 import { dot, sub } from './geometry.js';
@@ -23,6 +28,7 @@ import { analyze, uid } from './model.js';
 import { profileHeightAt } from './ceiling.js';
 import { MM_PER_IN, formatLength, parseLength } from './units.js';
 import { defaultProfile, fallbackSize, getProfile, profileLabel } from './trimCatalog.js';
+import { trimObstructions } from './furniture.js';
 
 export const RUN_CATEGORIES = ['baseboard', 'shoe', 'crown', 'chair-rail'];
 export const PACKAGE_CATEGORIES = ['baseboard', 'shoe', 'crown', 'chair-rail', 'door-casing', 'window-casing', 'panel-moulding'];
@@ -198,7 +204,11 @@ export function sanitizeFaceTrim(list) {
       // Ruler guides on the face (face coordinates: x = from the left corner, y = height).
       if (Array.isArray(r.guides)) r.guides = r.guides.filter((g) => g && typeof g.id === 'string' && (g.axis === 'x' || g.axis === 'y') && Number.isFinite(g.v));
       if (!r.guides?.length) delete r.guides;
-      for (const it of r.items) if (it.kind === 'run') it.cuts = Array.isArray(it.cuts) ? it.cuts.filter((c) => Number.isFinite(c?.s0) && Number.isFinite(c?.s1)) : [];
+      for (const it of r.items) {
+        if (it.kind === 'run') it.cuts = Array.isArray(it.cuts) ? it.cuts.filter((c) => Number.isFinite(c?.s0) && Number.isFinite(c?.s1)) : [];
+        if (it.omit != null) it.omit = Array.isArray(it.omit) ? it.omit.filter((k) => typeof k === 'string') : [];
+        if (it.omit && !it.omit.length) delete it.omit;
+      }
       return r;
     });
 }
@@ -250,7 +260,8 @@ function cappedArea(profile, s0, s1, cap) {
   return a;
 }
 
-function subtractIntervals(a, b, gaps) {
+/** [a, b] with the gaps taken out; pieces under MIN_PIECE are dropped. */
+export function subtractIntervals(a, b, gaps) {
   let segs = b - a >= MIN_PIECE ? [[a, b]] : [];
   for (const g of gaps) {
     segs = segs.flatMap(([x, y]) => {
@@ -272,15 +283,17 @@ export function openingEnvelopes(face, items, def) {
     const env = { op, casing: c, s0: op.s0, s1: op.s1, bottom: op.bottom, top: op.top };
     if (!c) return env;
     const ext = c.reveal + c.size;
-    env.s0 -= ext;
-    env.s1 += ext;
-    env.top += ext;
+    // Where a leg (or the head) has been taken off, trim runs up to the opening there.
+    const omit = new Set(c.omit ?? []);
+    if (!omit.has('left leg')) env.s0 -= ext;
+    if (!omit.has('right leg')) env.s1 += ext;
+    if (!omit.has('head')) env.top += ext;
     if (op.opening.type === 'window') {
       if (c.stool) {
         env.bottom = op.bottom - def.stoolThickness - (c.apron ? c.apron.size : 0);
         env.s0 = Math.min(env.s0, op.s0 - ext - c.stool.horn);
         env.s1 = Math.max(env.s1, op.s1 + ext + c.stool.horn);
-      } else {
+      } else if (!omit.has('bottom')) {
         env.bottom = op.bottom - ext;
       }
       if (c.sill) {
@@ -301,17 +314,25 @@ function runBand(face, item, s0, s1) {
   return [c - item.size, c];
 }
 
-/** Gaps a run must leave: openings (with their casing) and bulkheads it would run into. */
-export function runGaps(face, item, envelopes) {
-  const gaps = [];
+/**
+ * Gaps a run must leave: openings (with their casing), stub walls that meet
+ * the face, cabinets and fixtures against it (`obstructions`, from
+ * trimObstructions) where they are as high as the run, and bulkheads it would run into.
+ */
+export function runGaps(face, item, envelopes, obstructions = []) {
+  const gaps = (face.junctions ?? []).map((j, i) => ({ s0: j.s0, s1: j.s1, reason: 'wall', key: `wall:${j.wallId ?? i}` }));
   for (const env of envelopes) {
     const [z0, z1] = runBand(face, item, env.s0, env.s1);
-    if (env.bottom < z1 - 0.5 && env.top > z0 + 0.5) gaps.push({ s0: env.s0, s1: env.s1, reason: env.op.opening.type, openingId: env.op.opening.id });
+    if (env.bottom < z1 - 0.5 && env.top > z0 + 0.5) gaps.push({ s0: env.s0, s1: env.s1, reason: env.op.opening.type, openingId: env.op.opening.id, key: `opening:${env.op.opening.id}` });
   }
-  for (const b of face.bands ?? []) {
+  for (const ob of obstructions) {
+    const [z0, z1] = runBand(face, item, ob.s0, ob.s1);
+    if (ob.bottom < z1 - 0.5 && ob.top > z0 + 0.5) gaps.push({ s0: ob.s0, s1: ob.s1, reason: 'furniture', itemId: ob.itemId, key: `piece:${ob.itemId}` });
+  }
+  (face.bands ?? []).forEach((b, i) => {
     const [, z1] = runBand(face, item, b.s0, b.s1);
-    if (item.category === 'crown' || b.bottom < z1) gaps.push({ s0: b.s0, s1: b.s1, reason: 'bulkhead' });
-  }
+    if (item.category === 'crown' || b.bottom < z1) gaps.push({ s0: b.s0, s1: b.s1, reason: 'bulkhead', key: `bulkhead:${b.resolved?.bulkhead?.id ?? i}` });
+  });
   return gaps.sort((p, q) => p.s0 - q.s0);
 }
 
@@ -342,22 +363,39 @@ function resolveTrayCrown(face, item) {
   const a = clamp(item.start ?? lo, lo, hi);
   const b = clamp(item.end ?? hi, lo, hi);
   const top = face.tray.top;
-  const pieces = subtractIntervals(a, b, item.cuts ?? []).map(([s0, s1]) => ({
+  const keyOf = pieceKey(a, b, []);
+  const pieces = (item.omit?.includes('start|end') ? [] : subtractIntervals(a, b, item.cuts ?? [])).map(([s0, s1]) => ({
     part: 'tray crown', category: 'crown', profileId: item.profileId, size: item.size, s0, s1, length: s1 - s0,
-    poly: rect(s0, top - item.size, s1 - s0, item.size),
+    poly: rect(s0, top - item.size, s1 - s0, item.size), key: keyOf(s0, s1),
   }));
   return { item, a, b, lo, hi, gaps: [], autoSegments: subtractIntervals(a, b, []), pieces };
 }
 
-function resolveRun(face, item, envelopes) {
+function resolveRun(face, item, envelopes, obstructions) {
   if (isTrayCrown(item)) return resolveTrayCrown(face, item);
   const L = face.length;
   const a = clamp(item.start ?? 0, 0, L);
   const b = clamp(item.end ?? L, 0, L);
-  const gaps = runGaps(face, item, envelopes);
+  const gaps = runGaps(face, item, envelopes, obstructions);
   const auto = subtractIntervals(a, b, gaps);
-  const kept = subtractIntervals(a, b, [...gaps, ...(item.cuts ?? [])]);
-  return { item, a, b, gaps, autoSegments: auto, pieces: kept.map(([s0, s1]) => runPiece(face, item, s0, s1)) };
+  // Pieces between gaps, less those taken out (by what bounds them) and the positional cuts.
+  const keyOf = pieceKey(a, b, gaps);
+  const omit = new Set(item.omit ?? []);
+  const kept = auto.filter(([s0, s1]) => !omit.has(keyOf(s0, s1))).flatMap(([s0, s1]) => subtractIntervals(s0, s1, item.cuts ?? []));
+  return { item, a, b, gaps, autoSegments: auto, pieces: kept.map(([s0, s1]) => ({ ...runPiece(face, item, s0, s1), key: keyOf(s0, s1) })) };
+}
+
+/**
+ * Names a piece of a run from s0 to s1 by what bounds it: 'start' / 'end'
+ * (the run's ends), a gap's key ('opening:o1', 'wall:w3', 'piece:u2',
+ * 'bulkhead:b1') or 'cut' (a positional cut), e.g. 'start|opening:o1'.
+ */
+export function pieceKey(a, b, gaps) {
+  const side = (s, atStart) => {
+    if (Math.abs(s - (atStart ? a : b)) < 0.5) return atStart ? 'start' : 'end';
+    return gaps.find((g) => Math.abs((atStart ? g.s1 : g.s0) - s) < 0.5)?.key ?? 'cut';
+  };
+  return (s0, s1) => `${side(s0, true)}|${side(s1, false)}`;
 }
 
 function resolveCasing(face, item, def) {
@@ -372,19 +410,25 @@ function resolveCasing(face, item, def) {
   const headTop = op.top + r + w;
   const piece = (part, category, profileId, size, length, poly) => ({ part, category, profileId, size, length, poly });
   const pieces = [];
-  const casing = (part, length, poly) => pieces.push(piece(part, item.category, item.profileId, w, length, poly));
+  // Legs, head and bottom can be taken off one by one; the pieces they met are then cut square there.
+  const omit = new Set(item.omit ?? []);
+  const has = (part) => !omit.has(part);
+  const casing = (part, length, poly) => has(part) && pieces.push(piece(part, item.category, item.profileId, w, length, poly));
   // Casing meets at 45° mitres: each corner is split on the diagonal from the
   // outer corner to the inner one, so the pieces never overlap. Lengths are
   // the long points (outer edges), which is how casing is cut.
   const inL = op.s0 - r;
   const inR = op.s1 + r;
   const inTop = op.top + r;
-  const head = () => casing('head', span, [{ s: outerL, z: headTop }, { s: inL, z: inTop }, { s: inR, z: inTop }, { s: outerR, z: headTop }]);
+  const head = () => casing('head', span, [
+    { s: outerL, z: headTop }, { s: has('left leg') ? inL : outerL, z: inTop }, { s: has('right leg') ? inR : outerR, z: inTop }, { s: outerR, z: headTop },
+  ]);
   // A leg from z0 up to the head mitre; mitred at the bottom too when it meets a bottom casing.
   const legs = (z0, mitredBottom) => {
-    const inZ0 = mitredBottom ? z0 + w : z0;
-    casing('left leg', headTop - z0, [{ s: outerL, z: z0 }, { s: inL, z: inZ0 }, { s: inL, z: inTop }, { s: outerL, z: headTop }]);
-    casing('right leg', headTop - z0, [{ s: inR, z: inZ0 }, { s: outerR, z: z0 }, { s: outerR, z: headTop }, { s: inR, z: inTop }]);
+    const inZ0 = mitredBottom && has('bottom') ? z0 + w : z0;
+    const topIn = has('head') ? inTop : headTop;
+    casing('left leg', headTop - z0, [{ s: outerL, z: z0 }, { s: inL, z: inZ0 }, { s: inL, z: topIn }, { s: outerL, z: headTop }]);
+    casing('right leg', headTop - z0, [{ s: inR, z: inZ0 }, { s: outerR, z: z0 }, { s: outerR, z: headTop }, { s: inR, z: topIn }]);
   };
   if (o.type !== 'window') {
     // Legs stand square on the floor.
@@ -409,8 +453,8 @@ function resolveCasing(face, item, def) {
       const bottom = op.bottom - r - w;
       legs(bottom, true);
       head();
-      casing('bottom', span, [{ s: outerL, z: bottom }, { s: outerR, z: bottom }, { s: inR, z: bottom + w }, { s: inL, z: bottom + w }]);
-      below = bottom;
+      casing('bottom', span, [{ s: outerL, z: bottom }, { s: outerR, z: bottom }, { s: has('right leg') ? inR : outerR, z: bottom + w }, { s: has('left leg') ? inL : outerL, z: bottom + w }]);
+      below = has('bottom') ? bottom : op.bottom;
     }
     if (item.sill) {
       const si = item.sill;
@@ -433,7 +477,7 @@ function resolveBox(item) {
 }
 
 /** Stretches of [a, b] where the ceiling is at or above z (sloped ceilings cut boards short). */
-function intervalsBelowCeiling(profile, a, b, z) {
+export function intervalsBelowCeiling(profile, a, b, z) {
   const ss = [a, ...profile.map((p) => p.s).filter((s) => s > a && s < b), b];
   const out = [];
   for (let i = 1; i < ss.length; i++) {
@@ -501,14 +545,15 @@ export function wainscotMarks(face, item, a, b, holes, units) {
   return { pattern, spacing, lines, strips };
 }
 
-function resolveWainscot(face, item, envelopes, units) {
+function resolveWainscot(face, item, envelopes, units, obstructions = []) {
   const L = face.length;
   const a = clamp(item.start ?? 0, 0, L);
   const b = clamp(item.end ?? L, 0, L);
   if (b - a < MIN_PIECE) return { item, a, b, pieces: [] };
   let area = cappedArea(face.profile, a, b, item.height);
   const holes = [];
-  for (const env of envelopes) {
+  // A stub wall meeting the face takes the full height of the panelling; cabinets and fixtures their own.
+  for (const env of [...envelopes, ...obstructions, ...(face.junctions ?? []).map((j) => ({ s0: j.s0, s1: j.s1, bottom: 0, top: Infinity }))]) {
     const s0 = Math.max(a, env.s0);
     const s1 = Math.min(b, env.s1);
     const z0 = Math.max(0, env.bottom);
@@ -542,20 +587,21 @@ export function resolveFaceTrim(d, face, record = recordForFace(d, face)) {
   const items = record?.items ?? [];
   const def = trimDefaults(d.units);
   const envelopes = openingEnvelopes(face, items, def);
+  const obstructions = items.length ? trimObstructions(d, face) : [];
   const resolved = [];
   for (const item of items) {
     let r = null;
-    if (item.kind === 'run') r = resolveRun(face, item, envelopes);
+    if (item.kind === 'run') r = resolveRun(face, item, envelopes, obstructions);
     else if (item.kind === 'casing') r = resolveCasing(face, item, def);
     else if (item.kind === 'box') r = resolveBox(item);
-    else if (item.kind === 'wainscot') r = resolveWainscot(face, item, envelopes, d.units);
+    else if (item.kind === 'wainscot') r = resolveWainscot(face, item, envelopes, d.units, obstructions);
     if (r) {
       r.length = r.pieces.reduce((s, p) => s + p.length, 0);
       r.area = r.pieces.reduce((s, p) => s + (p.area ?? 0), 0);
       resolved.push(r);
     }
   }
-  return { face, record, items: resolved, envelopes };
+  return { face, record, items: resolved, envelopes, obstructions };
 }
 
 // ---------------------------------------------------------------------------
@@ -565,11 +611,14 @@ function unitOf(piece) {
   return getProfile(piece.profileId)?.unit ?? (piece.part === 'panel' ? 'sf' : 'lf');
 }
 
+/** Identifies one thing to buy: a category, profile and size. */
+export const trimLineKey = (category, profileId, size) => `${category}|${profileId ?? ''}|${Math.round(size * 100)}`;
+
 /** Merges quantity lines with the same category, profile and size. */
 export function mergeTrimLines(lines) {
   const map = new Map();
   for (const l of lines) {
-    const key = `${l.category}|${l.profileId ?? ''}|${Math.round(l.size * 100)}`;
+    const key = trimLineKey(l.category, l.profileId, l.size);
     const m = map.get(key);
     if (m) {
       m.length += l.length;
@@ -674,7 +723,7 @@ function dedupeItems(items) {
  * travel the same way (height guides go to every piece of a split face).
  */
 export function syncFaceTrim(d, analysis = analyze(d)) {
-  const faces = [...analysis.rooms.flatMap((g) => g.walls), ...analysis.exteriorFaces];
+  const faces = [...analysis.rooms.flatMap((g) => [...g.walls, ...g.spurFaces]), ...analysis.exteriorFaces];
   const perFace = new Map();
   for (const rec of d.faceTrim ?? []) {
     if (!rec.items?.length && !rec.guides?.length) continue;
@@ -714,7 +763,7 @@ export function migrateRoomCrown(d) {
   d.rooms.forEach((r) => delete r.crown);
   if (!ids.size) return;
   for (const g of analyze(d).rooms) {
-    if (g.room && ids.has(g.room.id)) for (const face of g.walls) applySpecToFace(d, face, { category: 'crown' });
+    if (g.room && ids.has(g.room.id)) for (const face of [...g.walls, ...g.spurFaces]) applySpecToFace(d, face, { category: 'crown' });
   }
 }
 
@@ -836,24 +885,11 @@ export function describeSpec(spec, units) {
 const PLAN_CATEGORIES = new Set(['baseboard', 'shoe', 'crown']);
 
 /**
- * Trim as seen on the plan, in plan coordinates.
- *
- * Baseboard, shoe moulding and crown: one band per piece, along the wall
- * face (tray crown: along the tray edge) and `depthOf(item)` mm deep into
- * the room; shoe moulding sits in front of the face's baseboard, if any. Where
- * pieces of the same kind meet at a corner, both ends are cut on the corner
- * bisector, so they meet in a mitre instead of overlapping or running into
- * the wall; ends at door gaps stay square.
- *
- * Casing: the two legs beside each cased opening, on the side of the wall
- * the casing is on, plus a window's stool or sill where it has one (heads
- * and aprons can't be seen from above). Depths come from
- * depthOf({ category, size, part }).
- *
- * Returns [{ category, part, tray, item, poly: [4 points] }]; stools and
- * sills come before the legs that stand on them.
+ * The runs (baseboard, shoe, crown) and casing parts of planTrimBands before
+ * mitring: each run is the line it follows (`at(s)` for face s), its band
+ * offset and depth off the wall, and its resolved pieces.
  */
-export function planTrimBands(d, faces, depthOf) {
+function planTrimLines(d, faces, depthOf) {
   const lines = [];
   const casingParts = [];
   for (const face of faces) {
@@ -878,8 +914,8 @@ export function planTrimBands(d, faces, depthOf) {
           if (!part) continue;
           casingParts.unshift({ category, part: key, tray: false, item: it, poly: box(outerL - part.horn, outerR + part.horn, depthOf({ category, size: part.size, part: key })) });
         }
-        casingParts.push({ category: it.category, part: 'leg', tray: false, item: it, poly: box(outerL, outerL + it.size, legDepth) });
-        casingParts.push({ category: it.category, part: 'leg', tray: false, item: it, poly: box(outerR - it.size, outerR, legDepth) });
+        if (!it.omit?.includes('left leg')) casingParts.push({ category: it.category, part: 'leg', tray: false, item: it, poly: box(outerL, outerL + it.size, legDepth) });
+        if (!it.omit?.includes('right leg')) casingParts.push({ category: it.category, part: 'leg', tray: false, item: it, poly: box(outerR - it.size, outerR, legDepth) });
         continue;
       }
       if (r.item.kind !== 'run' || !PLAN_CATEGORIES.has(r.item.category) || !r.pieces.length) continue;
@@ -892,17 +928,41 @@ export function planTrimBands(d, faces, depthOf) {
       const hi = tray ? Math.max(edge.s0, edge.s1) : face.length;
       const at = (s) => ({ x: origin.x + face.dir.x * s, y: origin.y + face.dir.y * s });
       lines.push({
-        group: `${r.item.category}:${tray ? 'tray' : face.kind}`, item: r.item, tray, dir: face.dir, inward: { x: -face.outward.x, y: -face.outward.y },
+        group: `${r.item.category}:${tray ? 'tray' : face.kind}`, face, item: r.item, tray, dir: face.dir, inward: { x: -face.outward.x, y: -face.outward.y },
         start: at(lo), end: at(hi), lo, hi, at, depth: depthOf(r.item), pieces: r.pieces,
         offset: r.item.category === 'shoe' && base ? depthOf(base.item) : 0,
       });
     }
   }
+  return { lines, casingParts };
+}
+
+/**
+ * Trim as seen on the plan, in plan coordinates.
+ *
+ * Baseboard, shoe moulding and crown: one band per piece, along the wall
+ * face (tray crown: along the tray edge) and `depthOf(item)` mm deep into
+ * the room; shoe moulding sits in front of the face's baseboard, if any. Where
+ * pieces of the same kind meet at a corner, both ends are cut on the corner
+ * bisector, so they meet in a mitre instead of overlapping or running into
+ * the wall; ends at door gaps stay square.
+ *
+ * Casing: the two legs beside each cased opening, on the side of the wall
+ * the casing is on, plus a window's stool or sill where it has one (heads
+ * and aprons can't be seen from above). Depths come from
+ * depthOf({ category, size, part }).
+ *
+ * Returns [{ category, part, tray, item, poly: [4 points] }]; stools and
+ * sills come before the legs that stand on them.
+ */
+export function planTrimBands(d, faces, depthOf) {
+  const { lines, casingParts } = planTrimLines(d, faces, depthOf);
   const near = (p, q) => Math.hypot(p.x - q.x, p.y - q.y) < 1;
-  const reaches = (l, s) => l.pieces.some((p) => Math.abs(p.s0 - s) < 1 || Math.abs(p.s1 - s) < 1);
-  // The piece of the same kind that continues round the corner at point `corner`.
+  // The run of the same kind that continues round the corner at point `corner`: one with a
+  // piece ending there (atStart) or starting there. Corners are face ends, or where a stub wall
+  // meets a face part way along; ends at door gaps have no neighbour and stay square.
   const neighbour = (l, corner, atStart) => lines.find((o) => o !== l && o.group === l.group
-    && (atStart ? near(o.end, corner) && reaches(o, o.hi) : near(o.start, corner) && reaches(o, o.lo)));
+    && o.pieces.some((p) => near(o.at(atStart ? p.s1 : p.s0), corner)));
   // The band's edge `outer` (its offset from the wall) or inner (offset + depth), as a line.
   const edgeLine = (l, outer) => {
     const k = outer ? l.offset : l.offset + l.depth;
@@ -924,13 +984,13 @@ export function planTrimBands(d, faces, depthOf) {
       let b = off(l.at(piece.s1), l.offset);
       let ia = off(l.at(piece.s0), l.offset + l.depth);
       let ib = off(l.at(piece.s1), l.offset + l.depth);
-      if (Math.abs(piece.s0 - l.lo) < 1) {
-        const o = neighbour(l, l.start, true);
+      {
+        const o = neighbour(l, l.at(piece.s0), true);
         ia = (o && mitre(l, o)) ?? ia;
         if (l.offset) a = (o && mitre(l, o, true)) ?? a;
       }
-      if (Math.abs(piece.s1 - l.hi) < 1) {
-        const o = neighbour(l, l.end, false);
+      {
+        const o = neighbour(l, l.at(piece.s1), false);
         ib = (o && mitre(l, o)) ?? ib;
         if (l.offset) b = (o && mitre(l, o, true)) ?? b;
       }
@@ -938,6 +998,33 @@ export function planTrimBands(d, faces, depthOf) {
     }
   }
   return [...out, ...casingParts];
+}
+
+/**
+ * Cut marks for the plan's runs (see core/trimCuts.js): `cutsFor(face, item)`
+ * returns the item's cut pieces as [{ s0, s1, joins: [s], segments: [{ s0, s1, tag }] }]
+ * in face coordinates. Returns joins as lines across the band
+ * ({ part: 'join', category, a, b }) and each length of stock along the
+ * band's inner edge, from a to b ({ part: 'cut', category, tag, a, b, dir, inward, length }).
+ */
+export function planTrimCutMarks(d, faces, depthOf, cutsFor) {
+  const marks = [];
+  for (const l of planTrimLines(d, faces, depthOf).lines) {
+    const cuts = cutsFor(l.face, l.item);
+    if (!cuts?.length) continue;
+    const off = (s, k) => {
+      const p = l.at(s);
+      return { x: p.x + l.inward.x * k, y: p.y + l.inward.y * k };
+    };
+    for (const c of cuts) {
+      for (const s of c.joins) marks.push({ part: 'join', category: l.item.category, a: off(s, l.offset), b: off(s, l.offset + l.depth) });
+      for (const seg of c.segments) {
+        const k = l.offset + l.depth;
+        marks.push({ part: 'cut', category: l.item.category, tag: seg.tag, a: off(seg.s0, k), b: off(seg.s1, k), dir: l.dir, inward: l.inward, length: Math.abs(seg.s1 - seg.s0) });
+      }
+    }
+  }
+  return marks;
 }
 
 // ---------------------------------------------------------------------------
@@ -952,6 +1039,8 @@ export function layoutBoxes(d, resolved, { bottom, top, gap, width, profileId, s
   const face = resolved.face;
   const blocks = resolved.envelopes.filter((e) => e.bottom < top && e.top > bottom).map((e) => ({ s0: e.s0, s1: e.s1 }));
   for (const b of face.bands ?? []) if (b.bottom < top) blocks.push({ s0: b.s0, s1: b.s1 });
+  for (const j of face.junctions ?? []) blocks.push({ s0: j.s0, s1: j.s1 });
+  for (const ob of resolved.obstructions ?? []) if (ob.bottom < top && ob.top > bottom) blocks.push({ s0: ob.s0, s1: ob.s1 });
   const spans = subtractIntervals(0, face.length, blocks.sort((p, q) => p.s0 - q.s0));
   const boxes = [];
   for (const [s0, s1] of spans) {

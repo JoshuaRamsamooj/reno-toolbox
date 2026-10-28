@@ -58,6 +58,8 @@ export function parseCatalog(raw) {
     if (p.pattern != null && !PANEL_PATTERNS.includes(p.pattern)) { warnings.push(`${where}: pattern must be one of ${PANEL_PATTERNS.join(', ')}`); continue; }
     const spacing = p.spacing != null ? parseCatalogLength(p.spacing) : null;
     if (p.spacing != null && spacing == null) { warnings.push(`${where}: spacing must be a length with units`); continue; }
+    const stockLength = p.stockLength != null && p.unit !== 'sheet' ? parseCatalogLength(p.stockLength) : null;
+    if (p.stockLength != null && p.unit !== 'sheet' && stockLength == null) { warnings.push(`${where}: stockLength must be a length with units`); continue; }
     const def = p.defaultWidth != null ? parseCatalogLength(p.defaultWidth) : null;
     const profile = {
       id: p.id,
@@ -67,6 +69,7 @@ export function parseCatalog(raw) {
       widths,
       defaultWidth: widths.find((w) => def != null && Math.abs(w - def) < 0.01) ?? widths[0],
       sheetLength,
+      stockLength, // length the profile is sold in (null: the estimate's trim piece length)
       // Panelling without a pattern: sheets show their seams, area goods their boards.
       pattern: p.pattern ?? (p.unit === 'sheet' ? 'panel' : 'shiplap'),
       spacing,

@@ -22,6 +22,7 @@ modules to compile). Environment variables: `PORT` (default 3000), `HOST`
 | Room | R | Drag a rectangle, or click a corner and type the **interior** size (`12x10`, `12'6" x 10'`, `3.6x4.2`) + Enter. Start a room on an existing corner and the shared wall merges. |
 | Wall | W | Click corners. Type a length (`8'6`, `96"`, `2.4`, `2400mm`) + Enter to place an exact wall in the direction of the mouse. Snaps to 45° (hold Shift for any angle), to corners, to walls and to alignment with other corners. Ending on a wall or corner joins it and finishes the chain. Esc/Enter/double-click also finish. |
 | Door / Window / Opening | D / N / O | Click on a wall. While placing, the gaps to the corners of each wall face are shown. Doors come in five styles (pick one in the inspector; new doors use the last style picked): **single swing**, **double swing** (a pair of half-width leaves), **sliding** (two bypass panels), **pocket** (slides into the wall) and **barn** (a slab hung on one face that slides along a track). |
+| Notes | A | Mark up the plan: pick a **text box**, **callout**, **arrow**, **line**, **box** or **ellipse** in the panel, with a colour and text size. Click to place a text box; for a callout press on the point to call out and drag to where the text goes; drag to draw the others (Shift: 45° or square, Alt: no snapping). The new note's text is ready to type in the panel (Enter for a new line, Ctrl+Enter or clicking away saves). Click a note to select it, drag it or its round end handles, Del deletes; with the Select tool notes select, box-select and move with the rest of a selection, and double-click goes to the text. Notes are saved with the plan, sized in plan units so they print at scale, and stay put when walls move. **Notes** in the bar above the plan hides them. |
 | Measure | M | Hover the side of any wall to see the length of that face (inside a room or outside the building) and click to pin it. Drag, or click twice, for a point-to-point measure: points snap to inside and outside corners, door and window jambs, wall faces and guides, and straight or 45° measures stop on the wall face they reach, so a measure across a room is its clear size. Diagonals show their across/down legs. Shift frees the angle, Del removes the last measure, Esc clears. Measurements are not saved and clear when you switch tools. |
 | Select | V | Click to select; Shift+click adds or removes. Drag a ruler guide to move it; Shift+drag one to pull a copy off it. With several items selected, dragging any selected wall or corner moves the whole selection together (walls attached to it stretch to follow; the corner nearest where you grabbed snaps). **Hold Shift while moving to lock the move** horizontal or vertical (whichever way you have moved further; a dashed line shows the lock), still snapping along it to corners, guides and the grid. Alt (Option) moves without snapping. Shift can be held from the start: Shift+drag on a selected wall or corner is a locked move, while a Shift+click without moving still removes it from the selection. Drag a box over empty floor to select several: left→right picks walls/openings fully inside, right→left picks anything the box touches. Ctrl+A selects everything. Drag corners, walls (perpendicular) or openings (along their wall); Alt frees walls and openings from the grid. Del deletes the whole selection in one undoable step. Double-click focuses the main field in the inspector. |
 | Pan | P | Drag anywhere to move around the plan. |
@@ -29,7 +30,7 @@ modules to compile). Environment variables: `PORT` (default 3000), `HOST`
 | Trim | T | Hover the side of a wall and click to open that face in the trim editor (see below). |
 | Level | L | Survey a room's subfloor and plan the leveling (see below). |
 
-Other controls: **Flooring (Shift+F)** shows the flooring layout (see below); **Furniture** shows or hides the layout pieces with the other tools; pan with the Pan tool (P), by right-dragging, with the middle mouse button or by holding Space; zoom with the
+Other controls: **Flooring (Shift+F)** shows the flooring layout (see below); **Furniture** shows or hides the layout pieces with the other tools; **Trim** and **Trim cuts** show the assigned trim and its cut plan (see Trim and panelling); pan with the Pan tool (P), by right-dragging, with the middle mouse button or by holding Space; zoom with the
 scroll wheel; F fits the plan; Ctrl+Z / Ctrl+Shift+Z undo and redo; Ctrl+S saves.
 
 The plan and the wall face editor share one drawing canvas: rulers along the
@@ -82,8 +83,8 @@ Assigned trim shows on the plan: baseboard as a solid band along the floor (shoe
 line and crown (including tray crown) as a dashed band at its projection,
 each mitred where runs meet at a corner and stopped square at door gaps.
 Cased doors and windows show their casing legs beside the jambs (on the side
-of the wall the casing is on), and windows their stool or sill. "Show trim on
-the plan" turns this off.
+of the wall the casing is on), and windows their stool or sill. The **Trim**
+checkbox in the bar above the plan turns this off.
 
 Rooms are **detected automatically** from enclosed areas, so you never have
 to define them by hand. An enclosed void with no way in (a chase, a boxed-in
@@ -93,6 +94,13 @@ left out of the takeoff (floor, walls, ceiling, insulation, trim), of
 flooring runs and of leveling. Drawing a wall across a room splits it, and deleting
 a dividing wall merges the rooms. Room names and ceiling settings carry over
 through these edits.
+
+A **stub wall** (a wall that sticks into a room and ends free, like a short
+return or a half wall) belongs to the room around it. Each side of it and its
+end are wall faces of that room (listed after the room's walls as "Stub
+wall, west side", "Stub wall end"…), so trim applied to the room or house
+reaches them, and the wall it grows from leaves a gap where it meets it
+(drawn on the elevation), with runs mitring into the stub's on the plan.
 
 The inspector edits the selection:
 - **Room:** name; ceiling profile (flat, shed, cathedral/gable, tray) with
@@ -122,8 +130,7 @@ The inspector edits the selection:
   beside the opening for them to slide open.
 - **Nothing selected:** default wall thickness, default ceiling height, the
   dimension display (interior faces, interior and exterior faces, or hidden),
-  ruler guides, and whether trimmed wall faces are marked on the plan ("Show
-  trim on the plan").
+  and ruler guides.
 
 Units can be switched between imperial and metric at any time. All geometry is
 stored in millimetres; only the display changes.
@@ -199,6 +206,16 @@ of the same; Q / E rotate the preview 90° (Shift: 15°); Esc stops.
   the screen diagonal, to the seat facing the screen). Twin beds, cribs and
   bunks only need one side clear. While placing, the preview is checked as
   if it were already placed.
+- **Trim behind built-ins:** cabinets, built-in appliances, vanities,
+  alcove tubs, showers and built-in benches stop wall trim where they stand
+  against a wall (within an inch), over the height they take up: base
+  cabinets take the baseboard, shoe and a chair rail at counter height,
+  upper cabinets only what lies between 54" and their top, a shower
+  everything up to 80". Loose furniture, toilets, pedestal sinks and laundry
+  leave the trim behind them. Each piece's panel has **No trim on the wall
+  behind it** to change that for that piece (the catalog's `cutsTrim`). The
+  pieces show as dashed outlines on the elevations and in the trim editor,
+  and the gaps flow through to the cut plan and the takeoff.
 - **Takeoff:** pieces are counted by type and size under Fixtures,
   Appliances, Cabinets, Mechanical and Furniture (priced like any other
   line), plus the countertop area over base cabinets, islands and
@@ -212,8 +229,8 @@ instructions take precedence.
 
 Trim belongs to a **wall face**: one side of a wall run. A wall between a
 kitchen and a hallway has two faces with independent trim, and exterior
-walls have an interior face and an exterior face. Only quantities are
-estimated (linear feet/metres, area, sheet count); there is no pricing.
+walls have an interior face and an exterior face. Trim is estimated in
+the lengths it is sold in (see the cut plan below) and priced in the Takeoff.
 
 Open a face with the Trim tool (T) on the plan, the "Edit trim" buttons on
 the wall inspector and Elevations cards, or the face picker on the **Trim**
@@ -226,7 +243,7 @@ casing is measured from their real size and position.
 
 | Tool | Key | How |
 |------|-----|-----|
-| Select | V | Click trim to select; drag a chair rail or box to move it; drag handles to resize boxes and wainscot or to shorten a run. Del deletes, X removes the clicked piece of a run, arrows nudge (Shift = 1" / 10 mm), Ctrl+D duplicates a box. |
+| Select | V | Click trim to select one piece of it: runs are split into pieces at every gap (openings, stub walls, built-ins), and casing into its legs, head and bottom (and a window's stool, apron and sill). Del (or X) removes just the clicked piece, or the whole item when it is the last one; a removed run piece is remembered by what bounds it (e.g. the corner and a door), so it stays off when the door moves, and taking off a casing leg lets the baseboard and chair rail run up to the jamb on that side. The panel lists the pieces with a ✕ each and a link to restore them. Drag a chair rail or box to move it; drag handles to resize boxes and wainscot or to shorten a run; arrows nudge (Shift = 1" / 10 mm), Ctrl+D duplicates a box. |
 | Shoe moulding | H | Click for shoe moulding (or quarter round) along the floor at the foot of the baseboard, or drag a partial run. It gaps at doors and stops at casing exactly like the baseboard, is drawn over it, and on the plan shows as a thin band just in front of it. |
 | Baseboard / Crown | B / C | Click for a run along the whole face, or drag a partial run. Baseboard gaps at doors and cased openings (stopping at the casing); crown follows sloped ceilings and gaps at bulkheads. Gaps follow the openings when they move. With a tray ceiling, click inside the dashed tray outline for **tray crown**: it runs along the tray side above that wall, at the tray height. |
 | Chair rail | R | Click at a height (the top edge), or type a height such as `36` + Enter. Breaks where it meets openings and their casing. |
@@ -263,7 +280,9 @@ in code. Each has an `id`, `name`, `category` (baseboard, shoe, crown, chair-rai
 panel-moulding, door-casing, window-casing, window-stool, window-apron,
 window-sill), `widths` written with units (`"5 1/4\""`, `"90mm"`) and an
 estimate `unit` (`lf`, `sf` or `sheet`; sheet goods also give `sheetLength`).
-Optional: `defaultWidth`, `default: true`, `description`, and for wall
+Optional: `defaultWidth`, `default: true`, `description`, `stockLength`
+(the length the profile is sold in, e.g. `"14'"`; without it the estimate's
+trim piece length is used), and for wall
 panelling `pattern` (`beadboard`, `shiplap`, `board-batten` or `panel`)
 with `spacing` (groove or batten spacing, with units), which decides how
 wainscot is drawn: grooves, boards at the board width, battens at the
@@ -271,6 +290,44 @@ batten width, or plain sheets, plus seams every sheet width for sheet goods.
 Without a pattern, sheet goods draw as plain sheets and area goods as boards.
 Invalid entries
 are skipped with a console warning. Sizes always display in the plan's units.
+
+**Trim cut plan.** Assigned trim is broken into the straight pieces that
+have to be cut (runs between corners and openings, crown again wherever a
+sloped ceiling changes pitch, casing legs, heads and bottoms, stools,
+aprons and sills, the four sides of each panel box, stretches of sheet
+wainscot between doors, and every course of shiplap). These pieces are laid
+out on stock lengths, per profile and size, in two ways:
+
+- **Least material** buys the fewest lengths. Pieces go in whole where they
+  fit and are spliced into leftover space where they don't, so runs get joins
+  wherever that saves a length.
+- **Fewest joins** only joins a run that is longer than the stock. It cuts
+  that run into full lengths and moves the join to the middle rather than
+  leave a short tail, then packs pieces best-fit so offcuts are used for
+  shorter runs elsewhere in the house.
+
+For example, a 10' × 10' room in 14' baseboard takes 3 lengths with two
+joins on one wall, or 4 lengths with no joins and a 4' offcut from each. No
+splice leaves a piece shorter than 12" (300 mm). For sheet wainscot the
+"stock" is one panel (a sheet width wide, as many per sheet as fit its
+height), and the seams count as joins. Board and batten stays an area estimate.
+
+**Trim cuts** (in the bars of the Plan, Elevations and Trim tabs) draws the
+cut plan:
+- each join is a red tick across the trim;
+- each length is tagged with the stick it is cut from (`B-3` = baseboard
+  stick 3, `C` crown, `D`/`W` door/window casing, `K` wainscot…);
+- on the plan, a box lists every trim's stock and joins.
+
+While the cuts are shown, the bar also has the **Least material | Fewest
+joins** switch (the same one as in the Takeoff). The choice is saved with
+the plan and is undoable, and the material list uses it. Everywhere the cut plan is shown,
+so is what fewest joins changes for the whole house: the extra amount to buy
+(lf/m, sheets, sq ft), the joins saved and, once trim is priced, the extra
+cost including tax. The Takeoff's **Trim cut plan** section puts both plans
+side by side for each trim. You can set each trim's stock length there
+(overriding the catalog and the default trim piece length), and it lists
+the cut list for every stick: each cut, where it goes and the offcut.
 
 ## Floor leveling
 
@@ -393,8 +450,13 @@ so there are no slivers at walls, in doorways or in traffic paths.
   exterior wall area, ceiling surface, potential baseboard and casing,
   opening counts), a first-pass material list with waste factors and the
   doors by style and size (with the hardware each style needs), assigned
-  trim by profile and size and by wall face, and CSV export. Trim lines come
-  only from assigned trim.
+  trim by profile and size and by wall face, the trim cut plan (see above)
+  and CSV export (with the cut list). Trim lines come only from assigned
+  trim. They are bought in whole lengths, boards or sheets from the cut plan
+  in use, plus the trim waste allowance rounded up to whole pieces.
+  The **Without waste** column (also in the CSV) shows each line before its
+  waste allowance or contingency: the net area, the whole sheets, lengths
+  or bags the job actually takes; lines without an allowance are the same.
   **Pricing:** type a unit price on any material line (per sheet, sq ft,
   lf, bag, door… as listed) to get its total; the quantity priced is the
   one shown, waste included. One tax rate (Estimate settings) applies to
@@ -424,11 +486,14 @@ public/js/core/    Pure, DOM-free logic (shared by the browser and the tests)
   faces.js         every wall face (room and exterior) with its profile and openings
   trimCatalog.js   loads and validates the trim profile catalog
   trim.js          trim items, resolved pieces and quantities, re-attachment, bulk apply
+  annotations.js   notes on the plan: text boxes, callouts, arrows, lines, boxes and ellipses; picking
+  trimCuts.js      trim cut plan: straight pieces, laid out on stock for least material or fewest joins
   furniture.js     layout planning: furniture/fixture catalog, footprints, placement snapping, clearance and layout checks
   takeoff.js       quantities and material list
 public/data/       trim-profiles.json (the profile catalog)
 public/js/ui/      shared drawing canvas (canvas.js) with its ruler guides (guides.js), SVG plan editor, elevations, wall face (trim) editor, inspector,
-                   flooring layer and panel (floorLayer.js, floorPanel.js), layout symbols and panels (layoutLayer.js, layoutPanel.js), takeoff view
+                   flooring layer and panel (floorLayer.js, floorPanel.js), layout symbols and panels (layoutLayer.js, layoutPanel.js), takeoff view,
+                   trim cut plan toggles, marks, legend and Takeoff section (cutPlan.js), notes panel (notesPanel.js)
 test/              node:test suites for core logic and the API
 ```
 
@@ -449,9 +514,12 @@ segments, and re-homes openings.
 
 `analyze(design)` is the single source of derived data. For each room it
 returns the interior polygon (centrelines offset by half the wall thickness)
-and the merged wall faces with their openings and exterior spans, plus the
-exterior faces around the outside of the building. The elevation, trim and
-takeoff views build on top of it.
+and the merged wall faces with their openings, exterior spans and
+`junctions` (where stub walls meet them), the faces of stub walls inside it
+(`spurFaces`, with `stub: 'side' | 'end'`), plus the exterior faces around
+the outside of the building. A stub's end face is addressed as side `'a'` or
+`'b'` of its wall (the node it ends at). The elevation, trim and takeoff
+views build on top of it.
 
 Trim (design version 2) is stored per face in `faceTrim`:
 `{ id, wallIds, outward, p0, p1, items, guides? }` (guides: that face's ruler
@@ -460,10 +528,11 @@ face at the last edit so `normalize()` can re-attach it: moved walls keep
 their trim, a face split by a new wall gives each piece a copy, merged faces
 combine, and casing goes with its opening. Items use face coordinates (mm
 from the face's left end as seen facing it, mm above the floor): runs
-(`start`/`end` null = to the corner, plus user `cuts`; gaps at openings are
-derived; crown with `placement: 'tray'` runs along the tray side above the
-wall instead of the wall top), casing (by `openingId`, with `reveal` and optional
-`stool`/`apron`/`sill`), boxes and wainscot. `trimPackages` holds named
+(`start`/`end` null = to the corner, plus user `cuts`; gaps at openings,
+stub walls and built-ins are derived, and `omit` lists pieces taken out by
+what bounds them, e.g. `'start|opening:o1'`; crown with `placement: 'tray'` runs along the tray side above the
+wall instead of the wall top), casing (by `openingId`, with `reveal`, optional
+`stool`/`apron`/`sill` and `omit` for legs, head or bottom taken off), boxes and wainscot. `trimPackages` holds named
 sets of `{ category, profileId, size, height?, … }`. Version 1 designs
 are migrated on load: a room's crown flag becomes crown runs on its faces.
 
@@ -480,7 +549,7 @@ clips every piece (Sutherland–Hodgman) and grades its cut, then packs the
 cuts into stock for the takeoff.
 
 Layout pieces are stored in `furniture`:
-`{ id, type, size, x, y, angle, w, d, label?, opts: { side, extended, screen, clear } }`.
+`{ id, type, size, x, y, angle, w, d, label?, opts: { side, extended, screen, clear, cutsTrim? } }`.
 `x`, `y` is the centre (mm) and `angle` the rotation in degrees; in the
 piece's own frame x runs across its width and y from its back to its front,
 so at angle 0 it backs onto a north wall and faces south. `type` and `size`
@@ -488,9 +557,20 @@ index the catalog in `core/furniture.js` (`FURNITURE`, sizes in inches),
 which supplies the shape, mounting (floor, overhead, counter, rug), height
 and standard clearances; `w`/`d` are copied from the size so they can be
 edited (`size: 'custom'` once they differ). `opts.clear` overrides the
-standard clearance per side (mm). `analyzeLayout(design)` returns each
+standard clearance per side (mm). `opts.cutsTrim` (true / false; absent =
+the catalog's `cutsTrim`) says whether wall trim is left off where the piece
+stands against a wall; `trimObstructions(design, face)` returns those spans
+and heights for a face. `analyzeLayout(design)` returns each
 piece's footprint, clearance zones, side distances and problems, plus the
 work triangles and TV viewing distances.
+
+Notes are stored in `annotations`:
+`{ id, kind, a, b, text?, size, color, box? }` (see `core/annotations.js`):
+`kind` is `text`, `callout`, `arrow`, `line`, `rect` or `ellipse`; `a` and
+`b` are plan points (mm): a text box's top-left (`b` null), a callout's text
+and the point it calls out, an arrow's tail and head, a box's or ellipse's
+opposite corners. `size` is the text height in mm and `color` one of red,
+blue, green, orange or black.
 
 ### Extending the estimate
 
@@ -501,4 +581,8 @@ these quantities in `materialList()`, or use `analyze()` /
 settings live in `design.estimate` and are merged with defaults by
 `resolveEstimate()`; that includes `prices` (unit price by material line
 key), `taxRate` (%) and `currency`, which `priceMaterials()` turns into line
-totals, a subtotal, tax and a total (`computeTakeoff().pricing`).
+totals, a subtotal, tax and a total (`computeTakeoff().pricing`). It also
+holds `trimLength` (default stock length), `stockLengths` (stock length by
+trim line key) and `trimOptimize` (true = fewest joins).
+`computeTakeoff().cuts` (or `trimCutSummary()` on its own) is the cut plan
+with the trim lines and their pricing under both plans.

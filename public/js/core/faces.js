@@ -2,8 +2,9 @@
 // outdoors. Room faces come from analyze() with their ceiling profile and
 // bulkhead bands; exterior faces get a top-of-wall profile from the rooms
 // behind them. A face is addressed by any of its wall sides, {wallId, dir},
-// where dir is the half-edge direction (0 = the side seen walking A→B).
-import { add, dot, scale, sub } from './geometry.js';
+// where dir is the half-edge direction (0 = the side seen walking A→B), or
+// 'a' / 'b' for the end face of a stub wall that ends free at node A or B.
+import { add, compassName, dot, scale, sub } from './geometry.js';
 import { analyze, roomElevations } from './model.js';
 import { profileHeightAt } from './ceiling.js';
 
@@ -18,7 +19,9 @@ export function faceKey(ref) {
 export function parseFaceKey(key) {
   const i = String(key ?? '').lastIndexOf(':');
   if (i <= 0) return null;
-  const dir = Number(key.slice(i + 1));
+  const raw = key.slice(i + 1);
+  if (raw === 'a' || raw === 'b') return { wallId: key.slice(0, i), dir: raw };
+  const dir = Number(raw);
   return dir === 0 || dir === 1 ? { wallId: key.slice(0, i), dir } : null;
 }
 
@@ -27,23 +30,37 @@ export function findFace(faces, ref) {
   return faces.find((f) => f.sides.some((s) => s.wallId === ref.wallId && s.dir === ref.dir)) ?? null;
 }
 
+/** Which part of a stub wall a face is: "west side" (the side facing west) or "end". */
+export function stubPart(w) {
+  return w.stub === 'end' ? 'end' : `${compassName(scale(w.outward, -1)).toLowerCase()} side`;
+}
+
+/** "3. North wall", or for stub walls "5. Stub wall, west side" / "6. Stub wall end". */
+export function faceTitle(w, number) {
+  if (w.stub === 'end') return `${number}. Stub wall end`;
+  if (w.stub) return `${number}. Stub wall, ${stubPart(w)}`;
+  return `${number}. ${w.compass} wall`;
+}
+
 /**
  * Every wall face in the plan: room faces (in room order, numbered as on the
- * Elevations tab; none for dead space) followed by exterior faces. Each carries `profile` (top of
- * wall as [{s, z}]), `bands` (bulkheads) and `openings` in face coordinates.
+ * Elevations tab, then the sides and ends of stub walls in the room; none for
+ * dead space) followed by exterior faces. Each carries `profile` (top of
+ * wall as [{s, z}]), `bands` (bulkheads), `openings` and `junctions` (where
+ * stub walls meet it) in face coordinates.
  */
 export function designFaces(d, analysis = analyze(d)) {
   const faces = [];
   for (const g of analysis.rooms) {
     if (g.dead) continue; // dead space is never finished, so its faces take no trim
     const elev = roomElevations(d, g);
-    elev.walls.forEach((w, i) => faces.push({
+    [...elev.walls, ...elev.spurs].forEach((w, i) => faces.push({
       ...w,
       kind: 'room',
       room: g,
       roomId: g.room?.id ?? null,
       number: i + 1,
-      name: `${g.room?.name ?? 'Room'} – ${i + 1}. ${w.compass} wall`,
+      name: `${g.room?.name ?? 'Room'} – ${faceTitle(w, i + 1)}`,
     }));
   }
   const roomFaces = faces.slice();

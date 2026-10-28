@@ -3,7 +3,9 @@
 // doors, windows and each other.
 //
 // Items are stored in design.furniture as
-//   { id, type, size, x, y, angle, w, d, label?, opts: { side, extended, screen, clear } }
+//   { id, type, size, x, y, angle, w, d, label?, opts: { side, extended, screen, clear, cutsTrim } }
+// opts.cutsTrim (true / false, absent = the catalog's choice) says whether
+// wall trim is left off where the item stands against a wall.
 // x, y: plan centre (mm); angle: degrees. In the item's own frame, local x
 // runs across its width (w) and local y from its back (-d/2) to its front
 // (+d/2): a bed's head is its back, a sofa faces its front, a cabinet's
@@ -50,6 +52,10 @@ export const FURNITURE_CATEGORIES = {
  *   counter true: carries countertop (base cabinets, islands, dishwashers)
  *   takeoff Furniture (default) | Cabinets | Fixtures | Appliances | Mechanical
  *   z0      bottom height for overhead items (inches)
+ *   cutsTrim true: built in against the wall (cabinets, vanities, showers, alcove
+ *           tubs, built-in appliances), so trim on that wall stops either side of it
+ *           wherever its height overlaps the trim; furniture that moves (and toilets,
+ *           pedestal sinks, laundry) leaves the trim behind it in place
  */
 export const FURNITURE = {
   // Bedroom ----------------------------------------------------------------
@@ -213,12 +219,12 @@ export const FURNITURE = {
 
   // Kitchen ----------------------------------------------------------------
   'base-cabinet': {
-    name: 'Base cabinet', category: 'kitchen', symbol: 'base', wall: true, counter: true, takeoff: 'Cabinets', clear: { front: 42 },
+    name: 'Base cabinet', category: 'kitchen', symbol: 'base', wall: true, cutsTrim: true, counter: true, takeoff: 'Cabinets', clear: { front: 42 },
     sizes: [9, 12, 15, 18, 21, 24, 27, 30, 33, 36].map((w) => ({ id: String(w), label: `${w}" wide`, w, d: 24, h: 34.5 })),
     defaultSize: '24',
   },
   'corner-cabinet': {
-    name: 'Corner base cabinet', category: 'kitchen', symbol: 'base', wall: true, counter: true, takeoff: 'Cabinets', clear: { front: 42 }, options: ['side'],
+    name: 'Corner base cabinet', category: 'kitchen', symbol: 'base', wall: true, cutsTrim: true, counter: true, takeoff: 'Cabinets', clear: { front: 42 }, options: ['side'],
     sizes: [
       { id: 'l-corner', label: 'L-corner (lazy Susan)', w: 36, d: 36, h: 34.5, shape: 'corner', leg: 24 },
       { id: 'diagonal', label: 'Diagonal corner', w: 36, d: 36, h: 34.5, shape: 'diag', cut: 12 },
@@ -226,17 +232,17 @@ export const FURNITURE = {
     ],
   },
   'upper-cabinet': {
-    name: 'Upper / wall cabinet', category: 'kitchen', symbol: 'upper', mount: 'overhead', wall: true, takeoff: 'Cabinets', z0: 54,
+    name: 'Upper / wall cabinet', category: 'kitchen', symbol: 'upper', mount: 'overhead', wall: true, cutsTrim: true, takeoff: 'Cabinets', z0: 54,
     sizes: [...[12, 15, 18, 24, 30, 36].map((w) => ({ id: String(w), label: `${w}" wide`, w, d: 12, h: 84 })), { id: '36x15', label: '36" wide, 15" deep (over fridge)', w: 36, d: 15, h: 84, z0: 70 }],
     defaultSize: '30',
   },
   'tall-cabinet': {
-    name: 'Tall pantry cabinet', category: 'kitchen', symbol: 'tall', wall: true, takeoff: 'Cabinets', clear: { front: 36 },
+    name: 'Tall pantry cabinet', category: 'kitchen', symbol: 'tall', wall: true, cutsTrim: true, takeoff: 'Cabinets', clear: { front: 36 },
     sizes: [18, 24, 30].map((w) => ({ id: String(w), label: `${w}" wide`, w, d: 24, h: 84 })),
     defaultSize: '24',
   },
   island: {
-    name: 'Kitchen island / breakfast bar', category: 'kitchen', symbol: 'island', counter: true, under: true, takeoff: 'Cabinets', clear: { front: 42, back: 42, left: 36, right: 36 },
+    name: 'Kitchen island / breakfast bar', category: 'kitchen', symbol: 'island', cutsTrim: true, counter: true, under: true, takeoff: 'Cabinets', clear: { front: 42, back: 42, left: 36, right: 36 },
     sizes: [
       { id: '48x24', label: '48" × 24"', w: 48, d: 24, h: 36 },
       { id: '72x36', label: '72" × 36"', w: 72, d: 36, h: 36 },
@@ -254,7 +260,7 @@ export const FURNITURE = {
     sizes: [{ id: 'std', label: 'Corner, 2 bowls', w: 36, d: 36, bowls: 2 }],
   },
   fridge: {
-    name: 'Refrigerator', category: 'kitchen', symbol: 'fridge', wall: true, takeoff: 'Appliances', clear: { front: 36 },
+    name: 'Refrigerator', category: 'kitchen', symbol: 'fridge', wall: true, cutsTrim: true, takeoff: 'Appliances', clear: { front: 36 },
     sizes: [
       { id: 'standard', label: 'Standard (top freezer)', w: 30, d: 30, h: 67 },
       { id: 'counter-depth', label: 'Counter-depth', w: 36, d: 25, h: 70 },
@@ -264,7 +270,7 @@ export const FURNITURE = {
     defaultSize: 'french',
   },
   range: {
-    name: 'Range / stove', category: 'kitchen', symbol: 'range', wall: true, takeoff: 'Appliances', clear: { front: 36 },
+    name: 'Range / stove', category: 'kitchen', symbol: 'range', wall: true, cutsTrim: true, takeoff: 'Appliances', clear: { front: 36 },
     sizes: [{ id: '30', label: '30"', w: 30, d: 26, h: 36, burners: 4 }, { id: '36', label: '36"', w: 36, d: 27, h: 36, burners: 6 }],
   },
   cooktop: {
@@ -272,15 +278,15 @@ export const FURNITURE = {
     sizes: [{ id: '30', label: '30"', w: 30, d: 21, burners: 4 }, { id: '36', label: '36"', w: 36, d: 21, burners: 5 }],
   },
   'wall-oven': {
-    name: 'Wall oven tower', category: 'kitchen', symbol: 'oven', wall: true, takeoff: 'Appliances', clear: { front: 36 },
+    name: 'Wall oven tower', category: 'kitchen', symbol: 'oven', wall: true, cutsTrim: true, takeoff: 'Appliances', clear: { front: 36 },
     sizes: [{ id: 'single', label: 'Single oven', w: 30, d: 25, h: 84 }, { id: 'double', label: 'Double oven', w: 30, d: 25, h: 84, ovens: 2 }],
   },
   dishwasher: {
-    name: 'Dishwasher', category: 'kitchen', symbol: 'dw', wall: true, counter: true, takeoff: 'Appliances', clear: { front: 24 },
+    name: 'Dishwasher', category: 'kitchen', symbol: 'dw', wall: true, cutsTrim: true, counter: true, takeoff: 'Appliances', clear: { front: 24 },
     sizes: [{ id: '24', label: 'Standard 24"', w: 24, d: 24, h: 34.5 }, { id: '18', label: 'Compact 18"', w: 18, d: 24, h: 34.5 }],
   },
   microwave: {
-    name: 'Microwave', category: 'kitchen', symbol: 'micro', wall: true, takeoff: 'Appliances',
+    name: 'Microwave', category: 'kitchen', symbol: 'micro', wall: true, cutsTrim: true, takeoff: 'Appliances',
     sizes: [
       { id: 'over-range', label: 'Over the range', w: 30, d: 16, mount: 'overhead', z0: 54, h: 70 },
       { id: 'drawer', label: 'Under-counter drawer', w: 30, d: 24, h: 34.5, clear: { front: 24 } },
@@ -288,7 +294,7 @@ export const FURNITURE = {
     ],
   },
   hood: {
-    name: 'Range hood', category: 'kitchen', symbol: 'hood', mount: 'overhead', wall: true, takeoff: 'Appliances', z0: 60,
+    name: 'Range hood', category: 'kitchen', symbol: 'hood', mount: 'overhead', wall: true, cutsTrim: true, takeoff: 'Appliances', z0: 60,
     sizes: [{ id: '30', label: '30"', w: 30, d: 20, h: 84 }, { id: '36', label: '36"', w: 36, d: 22, h: 84 }],
   },
 
@@ -303,7 +309,7 @@ export const FURNITURE = {
   },
   bidet: { name: 'Bidet', category: 'bath', symbol: 'bidet', wall: true, takeoff: 'Fixtures', centerline: 15, clear: { front: 21 }, sizes: [{ id: 'std', label: 'Freestanding', w: 15, d: 24, h: 16 }] },
   'bath-vanity': {
-    name: 'Bathroom vanity', category: 'bath', symbol: 'vanity', wall: true, takeoff: 'Fixtures', clear: { front: 21 },
+    name: 'Bathroom vanity', category: 'bath', symbol: 'vanity', wall: true, cutsTrim: true, takeoff: 'Fixtures', clear: { front: 21 },
     sizes: [
       ...[24, 30, 36, 48].map((w) => ({ id: String(w), label: `Single ${w}"`, w, d: 21, h: 34, bowls: 1 })),
       ...[60, 72].map((w) => ({ id: String(w), label: `Double ${w}"`, w, d: 22, h: 34, bowls: 2 })),
@@ -315,7 +321,7 @@ export const FURNITURE = {
     sizes: [{ id: 'pedestal', label: 'Pedestal', w: 22, d: 18, h: 34 }, { id: 'wall-hung', label: 'Wall-hung powder room', w: 20, d: 16, h: 34 }],
   },
   tub: {
-    name: 'Alcove bathtub', category: 'bath', symbol: 'tub', wall: true, takeoff: 'Fixtures', clear: { front: 21 },
+    name: 'Alcove bathtub', category: 'bath', symbol: 'tub', wall: true, cutsTrim: true, takeoff: 'Fixtures', clear: { front: 21 },
     sizes: [{ id: '60x30', label: '60" × 30"', w: 60, d: 30, h: 20 }, { id: '60x32', label: '60" × 32"', w: 60, d: 32, h: 20 }],
   },
   'freestanding-tub': {
@@ -323,7 +329,7 @@ export const FURNITURE = {
     sizes: [{ id: '66', label: '66" oval', w: 66, d: 32, h: 24 }, { id: '59', label: '59" oval', w: 59, d: 30, h: 24 }],
   },
   shower: {
-    name: 'Shower', category: 'bath', symbol: 'shower', wall: true, takeoff: 'Fixtures', clear: { front: 24 }, options: ['side'],
+    name: 'Shower', category: 'bath', symbol: 'shower', wall: true, cutsTrim: true, takeoff: 'Fixtures', clear: { front: 24 }, options: ['side'],
     sizes: [
       { id: 'square-36', label: 'Corner square 36" × 36"', w: 36, d: 36, h: 80 },
       { id: 'neo-36', label: 'Neo-angle 36"', w: 36, d: 36, h: 80, shape: 'diag', cut: 13 },
@@ -365,7 +371,7 @@ export const FURNITURE = {
   'stacked-laundry': { name: 'Stacked washer/dryer', category: 'utility', symbol: 'laundry', wall: true, takeoff: 'Appliances', clear: { front: 36 }, sizes: [{ id: 'std', label: '27" × 30"', w: 27, d: 30, h: 76, stacked: true }] },
   'utility-sink': { name: 'Laundry / utility sink', category: 'utility', symbol: 'pedestal', wall: true, takeoff: 'Fixtures', clear: { front: 21 }, sizes: [{ id: 'std', label: 'Standard', w: 24, d: 22, h: 34 }] },
   'mudroom-bench': {
-    name: 'Mudroom bench with hooks / cubbies', category: 'utility', symbol: 'bench', wall: true, clear: { front: 24 },
+    name: 'Mudroom bench with hooks / cubbies', category: 'utility', symbol: 'bench', wall: true, cutsTrim: true, clear: { front: 24 },
     sizes: [{ id: '48', label: '48" wide', w: 48, d: 16, h: 72 }, { id: '36', label: '36" wide', w: 36, d: 16, h: 72 }],
   },
   'shoe-rack': {
@@ -450,6 +456,54 @@ export function heightRange(r) {
   return [r.z0, Math.max(r.z0 + 1, r.h)];
 }
 
+/**
+ * Where items that cut trim (resolveItem().cutsTrim) stand against a wall
+ * face: [{ s0, s1, bottom, top, itemId, name }] in face coordinates. An item
+ * counts where its footprint is within an inch of the face (or a little into
+ * the wall), over the height it takes up; counter-mounted items (sinks,
+ * cooktops) and rugs never do, as the cabinet under them already has.
+ */
+export function trimObstructions(d, face) {
+  const out = [];
+  const inward = { x: -face.outward.x, y: -face.outward.y };
+  for (const item of d.furniture ?? []) {
+    const r = resolveItem(item);
+    if (!r.cutsTrim || r.mount === 'counter' || r.mount === 'rug') continue;
+    // The part of the footprint in a thin strip along the face.
+    let poly = footprint(r).outline;
+    poly = clipHalfPlane(poly, (p) => dot(sub(p, face.P), inward) + TRIM_REACH_BEHIND);
+    poly = clipHalfPlane(poly, (p) => TRIM_REACH - dot(sub(p, face.P), inward));
+    if (poly.length < 3) continue;
+    const ss = poly.map((p) => dot(sub(p, face.P), face.dir));
+    const s0 = Math.max(0, Math.min(...ss));
+    const s1 = Math.min(face.length, Math.max(...ss));
+    if (s1 - s0 < 1) continue;
+    const [bottom, top] = heightRange(r);
+    out.push({ s0, s1, bottom, top, itemId: item.id, name: r.name });
+  }
+  return out.sort((a, b) => a.s0 - b.s0);
+}
+
+const TRIM_REACH = 1 * IN; // how far off a wall an item can stand and still cut its trim
+const TRIM_REACH_BEHIND = 2 * IN; // or how far it may overlap into the wall
+
+/** The part of a polygon where f(p) ≥ 0, for a linear f (Sutherland–Hodgman against one edge). */
+function clipHalfPlane(poly, f) {
+  const out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const fa = f(a);
+    const fb = f(b);
+    if (fa >= 0) out.push(a);
+    if ((fa >= 0) !== (fb >= 0)) {
+      const t = fa / (fa - fb);
+      out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    }
+  }
+  return out;
+}
+
 export function sanitizeFurniture(list) {
   if (!Array.isArray(list)) return [];
   return list
@@ -489,6 +543,7 @@ export function resolveItem(item) {
     sizeLabel: item.size === 'custom' || !sz.label ? null : sz.label,
     shape: pick('shape', 'rect'), leg: pick('leg', 24) * IN, cut: pick('cut', 12) * IN, side: opts.side === 'left' ? 'left' : 'right',
     mount, h: pick('h', 30) * IN, z0: mount === 'overhead' ? pick('z0', 54) * IN : 0,
+    cutsTrim: typeof opts.cutsTrim === 'boolean' ? opts.cutsTrim : !!pick('cutsTrim', false),
     clear, oneSide: !!pick('oneSide', false), sideFrom: pick('sideFrom', 0) * IN,
     tuck: !!def.tuck, under: !!def.under, counter: !!def.counter, wall: !!def.wall,
     seats: extended ? sz.extSeats ?? sz.seats ?? 0 : sz.seats ?? def.seats ?? 0,

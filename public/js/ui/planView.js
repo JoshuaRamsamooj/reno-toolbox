@@ -19,11 +19,16 @@ import { checkbox, h } from './dom.js';
 import { DrawingCanvas } from './canvas.js';
 import { RulerGuides } from './guides.js';
 import { designFaces, faceAtPoint, faceKey, faceRef, faceRuns } from '../core/faces.js';
-import { planTrimBands } from '../core/trim.js';
+import { planTrimBands, planTrimCutMarks } from '../core/trim.js';
+import { planCutLookup } from '../core/trimCuts.js';
+import { cutLegendSvg, cutToggles } from './cutPlan.js';
 import {
   FURNITURE, alignPlacement, analyzeLayout, createFurniture, duplicateFurniture, footprint, resolveItem, toLocal, toWorld, wallPlacement, wrapAngle,
 } from '../core/furniture.js';
 import { applianceTag, furnitureGroup } from './layoutLayer.js';
+import {
+  ANNOTATION_COLORS, ANNOTATION_KINDS, annotationAt, annotationBounds, annotationHandles, calloutAnchor, handleAt, hasText, makeAnnotation, textBlock,
+} from '../core/annotations.js';
 
 const ANGLE_SNAP = (10 * Math.PI) / 180;
 const TYPABLE = /^[0-9.'"\/\- xXmMcC]$/;
@@ -39,6 +44,7 @@ export const TOOLS = {
   opening: { label: 'Opening', key: 'O', hint: 'Click on a wall to place a cased opening (no door)' },
   layout: { label: 'Layout', key: 'U', hint: 'Pick furniture, cabinets, fixtures or appliances in the panel, then click to place (Shift+click to place another) · wall pieces turn to face the room and sit flush on the nearest wall, sliding to corners, jambs and their neighbours · Q / E rotate 90° (Shift 15°) · drag to move (Shift locks the axis, Alt = no snapping) · Ctrl+D duplicates beside · arrows nudge · Esc stops placing' },
   measure: { label: 'Measure', key: 'M', hint: 'Hover the side of a wall for its length, click to pin it · drag (or click, click) between two points, snapping to corners, wall faces and jambs · Shift = free angle · Del removes the last · Esc clears' },
+  annotate: { label: 'Notes', key: 'A', hint: 'Pick a kind of note in the panel · click to place a text box · drag from a point to where its text goes for a callout · drag to draw an arrow, line, box or ellipse (Shift: 45° or square) · click a note to select it, drag to move it or its ends · type the text in the panel · Del deletes' },
   trim: { label: 'Trim', key: 'T', hint: 'Hover the side of a wall and click to open that face in the trim editor · each side of a wall (and the outside of exterior walls) has its own trim' },
   level: { label: 'Level', key: 'L', hint: 'Click a room, then a grid node · tap a preset reading in the bar, or type any value + Enter · quick entry jumps to the next node · Tab skips, arrows move, Del clears, Esc stops' },
 };
@@ -77,6 +83,10 @@ export class PlanView {
     // being placed ({ type, size, angle, ghost }) and the catalog's search and open sections.
     this.showFurniture = true;
     this.showClearances = 'all';
+    // Notes (annotations): shown or not, and the kind, colour and text size the Notes tool draws next.
+    this.showAnnotations = true;
+    this.noteKind = 'text';
+    this.noteStyle = { color: 'red', size: null };
     this.placing = null;
     this.layoutSearch = '';
     this.layoutOpen = new Set(['bedroom']);
@@ -154,7 +164,7 @@ export class PlanView {
 
   /** The Snap / Grid / zoom / Fit bar, rebuilt when a toggle changes. */
   renderBar() {
-    const key = `${this.canvas.snapOn}|${this.canvas.gridOn}|${this.showFlooring}|${this.showFurniture}`;
+    const key = `${this.canvas.snapOn}|${this.canvas.gridOn}|${this.showFlooring}|${this.showFurniture}|${this.showAnnotations}|${this.design.settings.showTrim !== false}|${this.app.showTrimCuts}|${this.design.estimate?.trimOptimize === true}`;
     if (this.barKey === key) return;
     this.barKey = key;
     this.bar.replaceChildren(
@@ -164,6 +174,12 @@ export class PlanView {
       h('span', { class: 'cv-layer', title: 'Show furniture, cabinets, fixtures and appliances (always shown with the Layout tool)' },
         checkbox('Furniture', this.showFurniture, (v) => {
           this.showFurniture = v;
+          this.render();
+        })),
+      ...cutToggles(this.app, { trimLayer: true }),
+      h('span', { class: 'cv-layer', title: 'Show text boxes, callouts, arrows and other notes (always shown with the Notes tool)' },
+        checkbox('Notes', this.showAnnotations, (v) => {
+          this.showAnnotations = v;
           this.render();
         })),
       h('span', { class: 'spacer' }),
@@ -968,6 +984,14 @@ export class PlanView {
         if (hit) items.push({ type: 'furniture', id: f.id });
       }
     }
+    if (this.notesVisible()) {
+      for (const an of d.annotations) {
+        const b = annotationBounds(an);
+        const inside = inBox({ x: b.minX, y: b.minY }, box) && inBox({ x: b.maxX, y: b.maxY }, box);
+        const touches = b.minX <= box.maxX && b.maxX >= box.minX && b.minY <= box.maxY && b.maxY >= box.minY;
+        if (crossing ? touches : inside) items.push({ type: 'annotation', id: an.id });
+      }
+    }
     // Guides are endless lines, so in either direction a box picks the ones it crosses.
     for (const id of this.rulers.inBox(box)) items.push({ type: 'guide', id });
     return items;
@@ -982,6 +1006,9 @@ export class PlanView {
     const d = this.design;
     const idx = indexDesign(d);
     const tol = this.px(6);
+    // Notes are drawn over everything, so they are picked first.
+    const note = this.noteAt(p);
+    if (note) return note;
     // The Layout tool picks furniture first; otherwise walls and openings win where they overlap it.
     const furniture = this.furnitureVisible() ? this.furnitureAt(p) : null;
     if (furniture && this.tool === 'layout') return furniture;
@@ -1113,6 +1140,27 @@ export class PlanView {
       return;
     }
 
+    if (this.tool === 'annotate') {
+      // A note's end handle, then a note (select and move it), else start drawing one.
+      const sel = this.selectedNote();
+      const handle = sel && handleAt(sel, raw, this.px(7));
+      if (handle) {
+        this.drag = { type: 'annotation-end', id: sel.id, key: handle, start: raw, moved: false };
+        return;
+      }
+      const hit = this.noteAt(raw);
+      if (hit) {
+        this.app.select(hit);
+        const an = this.design.annotations.find((x) => x.id === hit.id);
+        this.drag = { type: 'annotation', id: an.id, start: raw, orig: { a: { ...an.a }, b: an.b && { ...an.b } }, moved: false, hit };
+        return;
+      }
+      const s = this.noteSnap(raw, e);
+      this.draw = { type: 'note', kind: this.noteKind, a: s, b: s, sx: e.clientX, sy: e.clientY, moved: false };
+      this.render();
+      return;
+    }
+
     if (this.tool === 'layout' && this.placing) {
       // Click places the item where its preview is; Shift+click places it and keeps placing.
       this.updateGhost(raw, e);
@@ -1131,13 +1179,19 @@ export class PlanView {
       return;
     }
 
-    // Select tool (and the Layout tool between placements)
+    // Select tool (and the Layout tool between placements). A selected note's end handles come first.
+    const selNote = this.tool === 'select' ? this.selectedNote() : null;
+    const noteHandle = selNote && handleAt(selNote, raw, this.px(7));
+    if (noteHandle) {
+      this.drag = { type: 'annotation-end', id: selNote.id, key: noteHandle, start: raw, moved: false };
+      return;
+    }
     const hit = this.hitTest(raw);
     // Over empty floor or a room, a guide under the mouse wins (Shift+drag pulls a copy off it).
     if ((!hit || hit.type === 'room') && this.rulers.grab(e, scr)) return;
     // Shift+click adds or removes. Shift held from the press on a selected wall or corner locks its
     // move instead; letting go without moving still removes it from the selection.
-    const movable = !!hit && (hit.type === 'wall' || hit.type === 'node' || hit.type === 'furniture');
+    const movable = !!hit && (hit.type === 'wall' || hit.type === 'node' || hit.type === 'furniture' || hit.type === 'annotation');
     const shiftDrag = e.shiftKey && movable && this.app.isSelected(hit.type, hit.id);
     if (e.shiftKey && hit && !shiftDrag) {
       this.app.toggleSelect(hit);
@@ -1162,16 +1216,18 @@ export class PlanView {
     if (movable && this.app.selectedItems().length > 1 && this.app.isSelected(hit.type, hit.id)) {
       const ids = this.selectionNodes();
       const furn = this.selectedFurniture();
-      if (ids.length || furn.length) {
+      const notes = this.selectedNotes();
+      if (ids.length || furn.length || notes.length) {
         const nodes = this.design.nodes.filter((nd) => ids.includes(nd.id));
-        // The moving corner nearest the press point is the one that snaps (furniture moves on the grid).
-        const anchor = hit.type === 'furniture' || !nodes.length ? null : nodes.reduce((best, nd) => (dist(nd, raw) < dist(best, raw) ? nd : best));
-        const pressed = hit.type === 'furniture' ? furn.find((f) => f.id === hit.id) : null;
+        // The moving corner nearest the press point is the one that snaps (furniture and notes move on the grid).
+        const anchor = hit.type === 'furniture' || hit.type === 'annotation' || !nodes.length ? null : nodes.reduce((best, nd) => (dist(nd, raw) < dist(best, raw) ? nd : best));
+        const pressed = hit.type === 'furniture' ? furn.find((f) => f.id === hit.id) : hit.type === 'annotation' ? notes.find((an) => an.id === hit.id)?.a : null;
         this.drag = {
           type: 'group', ids, anchor: anchor?.id ?? null, anchorPt: anchor ? { x: anchor.x, y: anchor.y } : pressed ? { x: pressed.x, y: pressed.y } : { ...raw },
           start: raw, moved: false, hit, toggleOnClick: shiftDrag,
           orig: Object.fromEntries(nodes.map((nd) => [nd.id, { x: nd.x, y: nd.y }])),
           furn: Object.fromEntries(furn.map((f) => [f.id, { x: f.x, y: f.y }])),
+          notes: Object.fromEntries(notes.map((an) => [an.id, { a: { ...an.a }, b: an.b && { ...an.b } }])),
         };
         return;
       }
@@ -1196,7 +1252,147 @@ export class PlanView {
     } else if (hit.type === 'furniture') {
       const f = d.furniture.find((x) => x.id === hit.id);
       this.drag = { type: 'furniture', id: f.id, start: raw, orig: { x: f.x, y: f.y }, moved: false, hit, toggleOnClick: shiftDrag };
+    } else if (hit.type === 'annotation') {
+      const an = d.annotations.find((x) => x.id === hit.id);
+      this.drag = { type: 'annotation', id: an.id, start: raw, orig: { a: { ...an.a }, b: an.b && { ...an.b } }, moved: false, hit, toggleOnClick: shiftDrag };
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Notes (annotations)
+
+  /** Notes are drawn (and can be picked) when their layer is on, and always with the Notes tool. */
+  notesVisible() {
+    return this.showAnnotations || this.tool === 'annotate';
+  }
+
+  noteAt(p) {
+    if (!this.notesVisible()) return null;
+    const an = annotationAt(this.design.annotations, p, this.px(6));
+    return an ? { type: 'annotation', id: an.id } : null;
+  }
+
+  selectedNotes() {
+    const ids = new Set(this.app.selectedItems().filter((i) => i.type === 'annotation').map((i) => i.id));
+    return this.design.annotations.filter((an) => ids.has(an.id));
+  }
+
+  /** The note when exactly one is selected. */
+  selectedNote() {
+    const s = this.app.selection;
+    return s?.type === 'annotation' ? this.design.annotations.find((an) => an.id === s.id) ?? null : null;
+  }
+
+  /** A point for a note: snapped like everything else (Alt: free). With `from`, Shift keeps lines at 45° and boxes square. */
+  noteSnap(raw, e, from = null, kind = null) {
+    let p = e.altKey ? raw : this.snap(raw, {}).p;
+    if (from && e.shiftKey) {
+      const d = sub(p, from);
+      if (kind === 'rect' || kind === 'ellipse') {
+        const k = Math.max(Math.abs(d.x), Math.abs(d.y));
+        p = { x: from.x + Math.sign(d.x || 1) * k, y: from.y + Math.sign(d.y || 1) * k };
+      } else {
+        const a = Math.round(Math.atan2(d.y, d.x) / (Math.PI / 4)) * (Math.PI / 4);
+        const l = Math.hypot(d.x, d.y);
+        p = { x: from.x + Math.cos(a) * l, y: from.y + Math.sin(a) * l };
+      }
+    }
+    return p;
+  }
+
+  /** The note a finished press-drag-release draws, or null (with a hint) when it needs a drag. */
+  noteFromDraw(dr) {
+    const style = { color: this.noteStyle.color, size: this.noteStyle.size ?? undefined };
+    const u = this.units;
+    if (dr.kind === 'text') return makeAnnotation('text', dr.a, null, style, u);
+    if (dr.kind === 'callout') {
+      // Pressed on the point it calls out; released where the text goes (a click puts the text up and to the right).
+      const probe = makeAnnotation('callout', dr.a, dr.a, style, u);
+      const text = dr.moved ? dr.b : { x: dr.a.x + probe.size * 2, y: dr.a.y - probe.size * 4 };
+      return makeAnnotation('callout', text, dr.a, style, u);
+    }
+    if (!dr.moved || dist(dr.a, dr.b) < this.px(6)) {
+      this.flash(`Drag to draw ${{ arrow: 'an arrow', line: 'a line', rect: 'a box', ellipse: 'an ellipse' }[dr.kind]}`);
+      return null;
+    }
+    return makeAnnotation(dr.kind, dr.a, dr.b, style, u);
+  }
+
+  commitNote(dr) {
+    const an = this.noteFromDraw(dr);
+    if (!an) return;
+    this.app.change(`Add ${ANNOTATION_KINDS[an.kind].toLowerCase()}`, (d) => { d.annotations.push(an); });
+    this.app.select({ type: 'annotation', id: an.id });
+    // Straight on to typing the text.
+    if (hasText(an)) this.app.emit('focus-inspector', { type: 'annotation', id: an.id });
+  }
+
+  /** Arrowhead at b for a line from a, sized on screen. */
+  arrowHead(a, b) {
+    const d = norm(sub(b, a));
+    const n = perp(d);
+    const L = this.px(13);
+    const W = this.px(5);
+    const base = sub(b, scale(d, L));
+    return [b, add(base, scale(n, W)), add(base, scale(n, -W))];
+  }
+
+  noteSvg(an, cls = '') {
+    const color = ANNOTATION_COLORS[an.color] ?? ANNOTATION_COLORS.red;
+    const sw = this.px(2);
+    const parts = [];
+    if (an.kind === 'arrow' || an.kind === 'callout') {
+      const from = an.kind === 'callout' ? calloutAnchor(an) : an.a;
+      const head = this.arrowHead(from, an.b);
+      const end = add(an.b, scale(norm(sub(an.b, from)), -this.px(10)));
+      parts.push(tag('line', { x1: from.x, y1: from.y, x2: end.x, y2: end.y, stroke: color, 'stroke-width': sw }, null));
+      parts.push(tag('polygon', { points: pts(head), fill: color }, null));
+    }
+    if (an.kind === 'line') parts.push(tag('line', { x1: an.a.x, y1: an.a.y, x2: an.b.x, y2: an.b.y, stroke: color, 'stroke-width': sw }, null));
+    if (an.kind === 'rect' || an.kind === 'ellipse') {
+      const x = Math.min(an.a.x, an.b.x);
+      const y = Math.min(an.a.y, an.b.y);
+      const w = Math.abs(an.b.x - an.a.x);
+      const hh = Math.abs(an.b.y - an.a.y);
+      parts.push(an.kind === 'rect'
+        ? tag('rect', { x, y, width: w, height: hh, fill: 'none', stroke: color, 'stroke-width': sw }, null)
+        : tag('ellipse', { cx: x + w / 2, cy: y + hh / 2, rx: w / 2, ry: hh / 2, fill: 'none', stroke: color, 'stroke-width': sw }, null));
+    }
+    if (hasText(an)) {
+      const t = textBlock(an);
+      if (an.box) parts.push(tag('rect', { class: 'note-box', x: t.x, y: t.y, width: t.w, height: t.h, stroke: color, 'stroke-width': this.px(1.5) }, null));
+      const spans = t.lines.map((line, i) => tag('tspan', { x: t.x + t.pad, y: t.y + t.pad + i * t.lineHeight + an.size * 0.92 }, esc(line || ' '))).join('');
+      parts.push(tag('text', { class: 'note-text', 'font-size': an.size, fill: color }, spans));
+    }
+    return `<g class="note${cls}">${parts.join('')}</g>`;
+  }
+
+  /** Notes over the drawing, the one being drawn, and the selected notes' outlines and handles. */
+  renderNotes() {
+    const d = this.design;
+    const out = [];
+    if (this.notesVisible()) {
+      for (const an of d.annotations) {
+        const selected = this.isActive('annotation', an.id);
+        const hover = this.hover?.type === 'annotation' && this.hover.id === an.id;
+        if (selected || hover) {
+          const b = annotationBounds(an);
+          const m = this.px(5);
+          out.push(tag('rect', { class: `note-outline${selected ? ' selected' : ''}`, x: b.minX - m, y: b.minY - m, width: b.maxX - b.minX + 2 * m, height: b.maxY - b.minY + 2 * m, 'stroke-width': this.px(1), 'stroke-dasharray': `${n(this.px(4))} ${n(this.px(3))}` }, null));
+        }
+        out.push(this.noteSvg(an));
+      }
+      const sel = this.selectedNote();
+      if (sel) for (const hd of annotationHandles(sel)) out.push(tag('circle', { class: 'note-handle', cx: hd.p.x, cy: hd.p.y, r: this.px(5), 'stroke-width': this.px(1.5) }, null));
+    }
+    const dr = this.draw?.type === 'note' ? this.draw : null;
+    if (dr && (dr.moved || dr.kind === 'text' || dr.kind === 'callout')) {
+      const ghost = dr.kind === 'text' ? makeAnnotation('text', dr.a, null, { color: this.noteStyle.color, size: this.noteStyle.size ?? undefined }, this.units)
+        : dr.kind === 'callout' ? (dr.moved ? makeAnnotation('callout', dr.b, dr.a, { color: this.noteStyle.color, size: this.noteStyle.size ?? undefined }, this.units) : null)
+          : makeAnnotation(dr.kind, dr.a, dr.b, { color: this.noteStyle.color }, this.units);
+      if (ghost) out.push(this.noteSvg(ghost, ' ghost'));
+    }
+    return out.length ? `<g class="notes">${out.join('')}</g>` : '';
   }
 
   // -------------------------------------------------------------------------
@@ -1433,7 +1629,7 @@ export class PlanView {
       this.scheduleInspector();
       return;
     }
-    if (dr && (dr.type === 'node' || dr.type === 'wall' || dr.type === 'opening' || dr.type === 'group' || dr.type === 'furniture')) {
+    if (dr && (dr.type === 'node' || dr.type === 'wall' || dr.type === 'opening' || dr.type === 'group' || dr.type === 'furniture' || dr.type === 'annotation' || dr.type === 'annotation-end')) {
       if (!dr.moved && dist(raw, dr.start) < this.px(3)) return;
       if (!dr.moved) {
         dr.moved = true;
@@ -1465,6 +1661,17 @@ export class PlanView {
       this.cursor = { p: raw, guides: this.placing.guides };
     } else if (this.tool === 'pan') {
       this.hover = null;
+      this.cursor = { p: raw };
+    } else if (this.tool === 'annotate') {
+      const nd = this.draw?.type === 'note' ? this.draw : null;
+      if (nd) {
+        if (Math.hypot(e.clientX - nd.sx, e.clientY - nd.sy) > 4) nd.moved = true;
+        nd.b = this.noteSnap(raw, e, nd.a, nd.kind);
+        this.hover = null;
+      } else {
+        const hit = this.noteAt(raw);
+        if (JSON.stringify(hit) !== JSON.stringify(this.hover)) this.hover = hit;
+      }
       this.cursor = { p: raw };
     } else if (this.tool === 'trim') {
       this.hover = null;
@@ -1516,6 +1723,12 @@ export class PlanView {
         f.x = o.x + k.x;
         f.y = o.y + k.y;
       }
+      for (const [id, o] of Object.entries(dr.notes ?? {})) {
+        const an = d.annotations.find((x) => x.id === id);
+        if (!an) continue;
+        an.a = add(o.a, k);
+        if (o.b) an.b = add(o.b, k);
+      }
     } else if (dr.type === 'node') {
       const node = idx.nodes.get(dr.id);
       const { delta, axis } = this.lockAxis(sub(raw, dr.start), e);
@@ -1543,6 +1756,19 @@ export class PlanView {
       if (this.canvas.snapOn && Math.abs(offset - g.length / 2) < this.px(8)) offset = g.length / 2;
       // Slide up against neighbours rather than overlapping them.
       o.offset = freeOpeningOffset(d, o, offset, g.length) ?? o.offset;
+    } else if (dr.type === 'annotation') {
+      // The whole note moves on the grid (Shift locks the axis, Alt frees it).
+      const an = d.annotations.find((x) => x.id === dr.id);
+      const { delta } = this.lockAxis(sub(raw, dr.start), e);
+      const step = e.altKey || !this.canvas.snapOn ? this.canvas.fine : this.snapStep();
+      const k = { x: Math.round(delta.x / step) * step, y: Math.round(delta.y / step) * step };
+      an.a = add(dr.orig.a, k);
+      if (dr.orig.b) an.b = add(dr.orig.b, k);
+      this.cursor = { p: raw };
+    } else if (dr.type === 'annotation-end') {
+      const an = d.annotations.find((x) => x.id === dr.id);
+      an[dr.key] = this.noteSnap(raw, e, an[dr.key === 'a' ? 'b' : 'a'], an.kind);
+      this.cursor = { p: raw };
     } else if (dr.type === 'furniture') {
       const f = d.furniture.find((x) => x.id === dr.id);
       const { delta, axis } = this.lockAxis(sub(raw, dr.start), e);
@@ -1558,6 +1784,13 @@ export class PlanView {
     if (this.svg.hasPointerCapture(e.pointerId)) this.svg.releasePointerCapture(e.pointerId);
     if (this.canvas.endPan()) return;
     if (this.rulers.pointerUp()) return;
+    if (this.draw?.type === 'note') {
+      const nd = this.draw;
+      this.draw = null;
+      this.commitNote(nd);
+      this.render();
+      return;
+    }
     const m = this.tool === 'measure' ? this.measuring : null;
     if (m?.pressed) {
       // A drag measures point to point; a click on a wall face pins its length;
@@ -1587,7 +1820,7 @@ export class PlanView {
       return;
     }
     if (dr && dr.moved) {
-      this.app.endLive({ opening: 'Move opening', wall: 'Move wall', group: 'Move selection', furniture: 'Move furniture' }[dr.type] ?? 'Move corner');
+      this.app.endLive({ opening: 'Move opening', wall: 'Move wall', group: 'Move selection', furniture: 'Move furniture', annotation: 'Move note', 'annotation-end': 'Reshape note' }[dr.type] ?? 'Move corner');
       return;
     }
     if (dr?.toggleOnClick) {
@@ -1664,6 +1897,8 @@ export class PlanView {
     }
     if (e.key === 'Escape') {
       if (this.typed) this.typed = '';
+      else if (this.draw?.type === 'note') this.draw = null;
+      else if (this.tool === 'annotate' && this.app.selection) this.app.select(null);
       else if (this.draw) this.finishDrawing(this.tool === 'wall');
       else if (this.tool !== 'select') this.setTool('select');
       else this.app.select(null);
@@ -1733,6 +1968,7 @@ export class PlanView {
       floor?.doorways,
       this.renderOpenings(analysis, floor?.openings),
       this.renderFaceTrim(analysis),
+      this.renderTrimCuts(analysis),
       layout ? this.renderFurniture(layout) : '',
       this.renderDimensions(analysis),
       level ? '' : this.renderRoomLabels(analysis),
@@ -1741,11 +1977,13 @@ export class PlanView {
       this.renderSelection(analysis),
       layout ? this.renderLayoutMarks(layout) : '',
       this.renderMeasures(),
+      this.renderNotes(),
       this.renderPreview(analysis),
     ].join('');
     const cur = this.cursor?.p;
     const legend = floor?.layout ? renderFloorLegend(floor.layout, this.units, this.drag?.type === 'floor' && this.drag.moved, this.canvas.rect().height) : '';
-    this.overlayLayer.innerHTML = this.canvas.rulerGuidesSvg() + this.renderOverlay(level) + legend + this.canvas.rulersSvg({ cursor: cur && { x: cur.x, y: cur.y } });
+    const cutLegend = this.showCuts() && !level ? cutLegendSvg(this.app.trimCuts(), this.units, this.canvas.rect()) : '';
+    this.overlayLayer.innerHTML = this.canvas.rulerGuidesSvg() + this.renderOverlay(level) + legend + cutLegend + this.canvas.rulersSvg({ cursor: cur && { x: cur.x, y: cur.y } });
     this.updatePalette(level);
   }
 
@@ -2085,17 +2323,7 @@ export class PlanView {
     const faces = designFaces(this.design, analysis);
     const out = [];
     if (showTrim) {
-      // Real depth off the wall (¾" baseboard and casing, crown ≈ 70% of its width, stools and
-      // sills their width), but never thinner than a few pixels.
-      const stock = this.units === 'metric' ? 18 : 0.75 * MM_PER_IN;
-      const depth = (x) => {
-        if (x.category === 'crown') return Math.max(x.size * 0.7, this.px(7));
-        if (x.category === 'shoe') return Math.max(x.size * 0.67, this.px(2.5)); // ½" deep for ¾" shoe
-        if (x.part === 'leg') return Math.max(stock, this.px(4.5));
-        if (x.part === 'stool' || x.part === 'sill') return Math.max(x.size, this.px(5));
-        return Math.max(stock, this.px(3.5));
-      };
-      const bands = planTrimBands(this.design, faces, depth);
+      const bands = planTrimBands(this.design, faces, this.trimDepth());
       // Crown first (it is overhead), then baseboard at the floor line, then casing, which the baseboard stops against.
       const layer = (b) => (b.category === 'crown' ? 0 : b.part === 'run' ? 1 : 2);
       for (const b of [...bands].sort((p, q) => layer(p) - layer(q))) {
@@ -2119,6 +2347,59 @@ export class PlanView {
       }
     }
     return `<g class="face-trim">${out.join('')}</g>`;
+  }
+
+  /**
+   * How far trim stands off the wall on the plan: its real depth (¾" baseboard and casing,
+   * crown ≈ 70% of its width, stools and sills their width), but never thinner than a few pixels.
+   */
+  trimDepth() {
+    const stock = this.units === 'metric' ? 18 : 0.75 * MM_PER_IN;
+    return (x) => {
+      if (x.category === 'crown') return Math.max(x.size * 0.7, this.px(7));
+      if (x.category === 'shoe') return Math.max(x.size * 0.67, this.px(2.5)); // ½" deep for ¾" shoe
+      if (x.part === 'leg') return Math.max(stock, this.px(4.5));
+      if (x.part === 'stool' || x.part === 'sill') return Math.max(x.size, this.px(5));
+      return Math.max(stock, this.px(3.5));
+    };
+  }
+
+  /** The trim cut plan is drawn when "Trim cuts" is on and trim is shown on the plan. */
+  showCuts() {
+    return this.app.showTrimCuts && this.design.settings.showTrim !== false && this.design.faceTrim.length > 0;
+  }
+
+  /**
+   * Joins in baseboard, shoe and crown runs (red ticks across the band) and,
+   * where there is room, the tag of the stick each length comes from (B-3 =
+   * baseboard stick 3 in the Takeoff's cut list), for the plan the estimate uses.
+   */
+  renderTrimCuts(analysis) {
+    if (!this.showCuts()) return '';
+    const cuts = this.app.trimCuts();
+    const marks = planTrimCutMarks(this.design, designFaces(this.design, analysis), this.trimDepth(), planCutLookup(cuts.plan, cuts.mode));
+    const out = [];
+    const fs = this.px(9);
+    for (const m of marks) {
+      if (m.part === 'join') {
+        const d = sub(m.b, m.a);
+        const ext = scale(norm(d), this.px(3));
+        const a = sub(m.a, ext);
+        const b = add(m.b, ext);
+        out.push(tag('line', { class: 'cut-join-halo', x1: a.x, y1: a.y, x2: b.x, y2: b.y, 'stroke-width': this.px(4.5) }, null));
+        out.push(tag('line', { class: 'cut-join', x1: a.x, y1: a.y, x2: b.x, y2: b.y, 'stroke-width': this.px(2.2) }, null));
+      } else if (m.length * this.view.scale >= m.tag.length * 9 * 0.62 + 10) {
+        // Off-centre (crown toward the other end), clear of the wall's dimension and each other.
+        const at = add(m.a, scale(sub(m.b, m.a), m.category === 'crown' ? 0.72 : 0.28));
+        const p = add(at, scale(m.inward, this.px(m.category === 'crown' ? 9 : 7)));
+        const angle = uprightAngle(m.dir);
+        out.push(tag('text', {
+          class: 'cut-label', x: p.x, y: p.y, 'font-size': fs, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+          transform: angle ? `rotate(${n(angle)} ${n(p.x)} ${n(p.y)})` : undefined,
+        }, esc(m.tag)));
+      }
+    }
+    return `<g class="cut-marks">${out.join('')}</g>`;
   }
 
   label(p, text, angle, cls, size) {

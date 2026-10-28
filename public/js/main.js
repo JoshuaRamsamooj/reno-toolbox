@@ -2,6 +2,7 @@
 // persistence, and wires the views together.
 import { createDesign, migrateDesign, newOpeningProblem, normalize, openingProblems, deleteGuide, deleteNode, deleteOpening, deleteRoom, deleteWall } from './core/model.js';
 import { deleteFurniture } from './core/furniture.js';
+import { deleteAnnotation } from './core/annotations.js';
 import { renderThumbnail } from './core/thumbnail.js';
 import { formatLength } from './core/units.js';
 import { api } from './api.js';
@@ -11,6 +12,7 @@ import { ElevationView } from './ui/elevationView.js';
 import { TakeoffView } from './ui/takeoffView.js';
 import { FaceEditor } from './ui/faceEditor.js';
 import { setCatalog } from './core/trimCatalog.js';
+import { trimCutSummary } from './core/takeoff.js';
 import { h } from './ui/dom.js';
 
 const DRAFT_KEY = 'reno-toolbox:draft';
@@ -31,6 +33,7 @@ class App {
     this.spaceDown = false;
     this.trimFace = null; // wall face open in the Trim tab: { wallId, dir }
     this.lastPackageId = null;
+    this.showTrimCuts = false; // trim cut plan drawn on the plan, elevations and wall face editor
 
     this.plan = new PlanView(this, $('#plan'));
     this.inspector = new Inspector(this, $('#inspector'));
@@ -158,7 +161,10 @@ class App {
   }
 
   validateSelection() {
-    const lists = { wall: this.design.walls, node: this.design.nodes, opening: this.design.openings, room: this.design.rooms, guide: this.design.guides, furniture: this.design.furniture };
+    const lists = {
+      wall: this.design.walls, node: this.design.nodes, opening: this.design.openings, room: this.design.rooms, guide: this.design.guides, furniture: this.design.furniture,
+      annotation: this.design.annotations,
+    };
     const alive = this.selectedItems().filter((i) => lists[i.type]?.some((x) => x.id === i.id));
     this.selection = alive.length > 1 ? { type: 'multi', items: alive } : alive[0] ?? null;
   }
@@ -203,6 +209,7 @@ class App {
       ...this.design.walls.map((w) => ({ type: 'wall', id: w.id })),
       ...this.design.openings.map((o) => ({ type: 'opening', id: o.id })),
       ...(this.plan.furnitureVisible() ? this.design.furniture.map((f) => ({ type: 'furniture', id: f.id })) : []),
+      ...(this.plan.notesVisible() ? this.design.annotations.map((an) => ({ type: 'annotation', id: an.id })) : []),
     ]);
   }
 
@@ -210,8 +217,8 @@ class App {
     const items = this.selectedItems();
     if (!items.length) return;
     // Rooms first (they look at the walls), then openings, walls and corners.
-    const order = { room: 0, opening: 1, wall: 2, node: 3, guide: 4, furniture: 5 };
-    const ops = { wall: deleteWall, node: deleteNode, opening: deleteOpening, room: deleteRoom, guide: deleteGuide, furniture: deleteFurniture };
+    const order = { room: 0, opening: 1, wall: 2, node: 3, guide: 4, furniture: 5, annotation: 6 };
+    const ops = { wall: deleteWall, node: deleteNode, opening: deleteOpening, room: deleteRoom, guide: deleteGuide, furniture: deleteFurniture, annotation: deleteAnnotation };
     const sorted = [...items].sort((a, b) => order[a.type] - order[b.type]);
     const label = items.length > 1 ? `Delete ${items.length} items` : `Delete ${items[0].type}`;
     this.change(label, (d) => sorted.forEach((i) => ops[i.type](d, i.id)));
@@ -230,6 +237,26 @@ class App {
     if (this.tab === 'trim') this.faceEditor.render();
     $('#btn-undo').disabled = !this.undoStack.length;
     $('#btn-redo').disabled = !this.redoStack.length;
+  }
+
+  /** The trim cut plan and both plans' trim pricing (core/takeoff.js trimCutSummary), memoised on the design. */
+  trimCuts() {
+    const d = this.design;
+    const key = JSON.stringify([d.nodes, d.walls, d.openings, d.rooms, d.faceTrim, d.estimate, d.units, d.settings]);
+    if (this.cutsCache?.key !== key) this.cutsCache = { key, value: trimCutSummary(d) };
+    return this.cutsCache.value;
+  }
+
+  setShowTrimCuts(on) {
+    this.showTrimCuts = on;
+    this.refresh();
+  }
+
+  /** Fewest joins (on) or least material (off): saved with the plan's estimate, so it is undoable. */
+  setTrimOptimize(on) {
+    this.change(on ? 'Cut trim for fewest joins' : 'Cut trim for least material', (d) => {
+      d.estimate = { ...(d.estimate ?? {}), trimOptimize: on };
+    });
   }
 
   showTab(tab) {
@@ -266,6 +293,7 @@ class App {
       measure: '<rect x="2" y="8" width="20" height="8" rx="1" fill="none" stroke-width="2"/><path d="M6 8v4M10 8v3M14 8v4M18 8v3" stroke-width="1.6" fill="none"/>',
       level: '<rect x="2" y="8" width="20" height="8" rx="2" fill="none" stroke-width="2"/><rect x="9.5" y="10" width="5" height="4" rx="1" stroke="none"/><path d="M7 8v3M17 8v3" stroke-width="1.5"/>',
       trim: '<path d="M3 4h18M3 20h18" stroke-width="2.5" fill="none"/><path d="M3 4v16" stroke-width="2" fill="none"/><rect x="8" y="8" width="9" height="8" fill="none" stroke-width="1.8"/>',
+      annotate: '<rect x="3" y="4" width="12" height="8" rx="1" fill="none" stroke-width="1.8"/><path d="M6 7h6M6 9.5h4" stroke-width="1.4" fill="none"/><path d="M13 14l6 6M19 20v-4M19 20h-4" stroke-width="2" fill="none"/>',
     };
     const bar = $('#tools');
     for (const [key, tool] of Object.entries(TOOLS)) {

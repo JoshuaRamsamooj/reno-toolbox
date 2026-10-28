@@ -1,8 +1,9 @@
 // Takeoff tab: material list, per-room quantities and estimate settings.
-import { COUNT_UNITS, computeTakeoff, formatMoney, resolveEstimate, takeoffToCsv } from '../core/takeoff.js';
+import { COUNT_UNITS, computeTakeoff, formatMoney, netQuantity, resolveEstimate, takeoffToCsv } from '../core/takeoff.js';
 import { MM_PER_FT, areaUnit, areaValue, formatLength, lengthValue } from '../core/units.js';
 import { checkbox, field, h, lengthInput, numberInput, select } from './dom.js';
 import { TRIM_CATEGORIES, getProfile, profileLabel } from '../core/trimCatalog.js';
+import { cutPlanSection } from './cutPlan.js';
 
 const SHEETS = {
   imperial: { '4x8': [4, 8], '4x10': [4, 10], '4x12': [4, 12] },
@@ -13,6 +14,7 @@ export class TakeoffView {
   constructor(app, el) {
     this.app = app;
     this.el = el;
+    this.openCutLists = new Set(); // cut list groups left open across re-renders
   }
 
   render() {
@@ -32,19 +34,22 @@ export class TakeoffView {
     const money = (v) => formatMoney(v, p.currency);
     const keys = t.materials.map((m) => m.key);
     const materials = h('table', { class: 'data' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Material'), h('th', { class: 'num' }, 'Quantity'), h('th', {}, 'Unit'),
+      h('thead', {}, h('tr', {}, h('th', {}, 'Material'),
+        h('th', { class: 'num', title: 'What the job needs before the waste allowance (or contingency) is added' }, 'Without waste'),
+        h('th', { class: 'num', title: 'What to buy: waste included, and what is priced' }, 'Quantity'), h('th', {}, 'Unit'),
         h('th', { class: 'num' }, 'Unit price'), h('th', { class: 'num' }, 'Total'), h('th', {}, 'Basis'))),
       h('tbody', {}, t.materials.map((m, i) => h('tr', {},
         h('td', {}, h('span', { class: `cat cat-${m.category.toLowerCase()}` }, m.category), ' ', m.label),
+        h('td', { class: 'num muted' }, COUNT_UNITS.has(m.unit) ? String(netQuantity(m)) : netQuantity(m).toFixed(1)),
         h('td', { class: 'num' }, COUNT_UNITS.has(m.unit) ? String(m.quantity) : m.quantity.toFixed(1)),
         h('td', {}, m.unit),
         h('td', { class: 'num' }, this.priceInput(m, p.lines[i].unitPrice, p.currency, keys)),
         h('td', { class: 'num' }, p.lines[i].cost == null ? h('span', { class: 'muted' }, '–') : money(p.lines[i].cost)),
         h('td', { class: 'muted small' }, m.detail)))),
       h('tfoot', { class: 'price-foot' },
-        h('tr', {}, h('td', { colspan: 4 }, 'Subtotal', h('span', { class: 'muted small' }, ` · ${p.priced} of ${p.lines.length} lines priced`)), h('td', { class: 'num' }, money(p.subtotal)), h('td', {})),
-        h('tr', {}, h('td', { colspan: 4 }, `Tax (${p.taxRate}%)`, h('span', { class: 'muted small' }, ' · one rate for every line, set in Estimate settings')), h('td', { class: 'num' }, money(p.tax)), h('td', {})),
-        h('tr', { class: 'grand' }, h('td', { colspan: 4 }, 'Total'), h('td', { class: 'num' }, money(p.total)), h('td', {}))),
+        h('tr', {}, h('td', { colspan: 5 }, 'Subtotal', h('span', { class: 'muted small' }, ` · ${p.priced} of ${p.lines.length} lines priced`)), h('td', { class: 'num' }, money(p.subtotal)), h('td', {})),
+        h('tr', {}, h('td', { colspan: 5 }, `Tax (${p.taxRate}%)`, h('span', { class: 'muted small' }, ' · one rate for every line, set in Estimate settings')), h('td', { class: 'num' }, money(p.tax)), h('td', {})),
+        h('tr', { class: 'grand' }, h('td', { colspan: 5 }, 'Total'), h('td', { class: 'num' }, money(p.total)), h('td', {}))),
     );
 
     const cols = [
@@ -76,6 +81,7 @@ export class TakeoffView {
             h('button', { onclick: () => this.downloadCsv(t) }, 'Export CSV'),
           ),
           h('div', { class: 'table-wrap' }, materials),
+          t.trim.lines.length ? cutPlanSection(this.app, t.cuts, { openGroups: this.openCutLists }) : null,
           h('h2', {}, 'Trim by wall face'),
           this.trimSchedule(t),
           h('h2', {}, 'Quantities by room'),
@@ -195,7 +201,7 @@ export class TakeoffView {
       field('Insulation waste', numberInput(e.insulationWaste, (v) => set('Insulation waste', (x) => { x.insulationWaste = v; }), { min: 0, max: 100, suffix: '%' })),
       checkbox('Insulate ceilings (top floor / attic)', e.insulateCeilings, (v) => set('Ceiling insulation', (x) => { x.insulateCeilings = v; })),
       field('Trim piece length', lengthInput(e.trimLength, u, (mm) => set('Trim length', (x) => { x.trimLength = mm; }), { min: 100 }),
-        `Currently ${formatLength(e.trimLength, u)}`),
+        `Stock length for trim without its own (set per profile in the trim cut plan). Currently ${formatLength(e.trimLength, u)}`),
       field('Trim waste', numberInput(e.trimWaste, (v) => set('Trim waste', (x) => { x.trimWaste = v; }), { min: 0, max: 100, suffix: '%' })),
       field('Paint coats', numberInput(e.paintCoats, (v) => set('Paint coats', (x) => { x.paintCoats = Math.max(1, Math.round(v)); }), { min: 1, max: 5 })),
       field(`Paint coverage (${areaUnit(u)} per ${u === 'metric' ? 'litre' : 'gallon'})`, numberInput(e.paintCoverage[u], (v) => set('Paint coverage', (x) => {

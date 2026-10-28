@@ -208,7 +208,9 @@ test('wainscot area excludes openings and counts sheets', () => {
   const t = computeTakeoff(d);
   const sheets = t.materials.find((m) => m.trim?.profileId === 'wainscot-beadboard-sheet');
   assert.equal(sheets.unit, 'sheets');
-  assert.equal(sheets.quantity, 1); // 24.9 sq ft + 10% < one 32 sq ft sheet
+  // Two 56" stretches either side of the door take three 48" × 32" panels: one 4' × 8' sheet, + 10% waste → 2.
+  assert.equal(sheets.cuts.count, 1);
+  assert.equal(sheets.quantity, 2);
   near(sheets.trim.area / MM2_PER_FT2, (144 * 32 - 32 * 32) / 144, 0.01);
 });
 
@@ -359,7 +361,9 @@ test('takeoff lists assigned trim by profile and size, with no automatic trim li
   const lines = t.materials.filter((m) => m.category === 'Trim');
   assert.equal(lines.length, 1);
   near(lines[0].trim.length / FT, 44 + 36);
-  near(lines[0].quantity, (44 + 36) * 1.1);
+  // Bought in whole 16' lengths from the cut plan (80' fits in 5), + 10% waste → 6 lengths.
+  assert.equal(lines[0].cuts.count, 5);
+  near(lines[0].quantity, 6 * 16);
   assert.equal(t.rooms[0].trim.length, 1);
   assert.match(lines[0].label, /Colonial baseboard 5 1\/4"/);
 
@@ -665,4 +669,102 @@ test('plan view: shoe moulding sits just in front of the baseboard, mitred at th
   edit(d, (x) => applySpecs(x, scopeFaces(designFaces(x), 'house'), [{ category: 'baseboard', remove: true }]));
   const alone = planTrimBands(d, designFaces(d), depth).filter((b) => b.category === 'shoe');
   assert.equal(alone.flatMap((b) => b.poly).filter((p) => Math.hypot(p.x - corner.x, p.y - corner.y) < 0.01).length, 2);
+});
+
+test('stub walls get trim on both sides and the end; the wall they grow from gaps around them', () => {
+  const T = 4.5 * IN;
+  const d = room(T);
+  edit(d, (x) => addWallChain(x, [{ x: 6 * FT, y: 0 }, { x: 6 * FT, y: 3 * FT }]));
+  const faces = designFaces(d).filter((f) => f.kind === 'room');
+  const stubs = faces.filter((f) => f.stub);
+  assert.deepEqual(stubs.map((f) => f.stub).sort(), ['end', 'side', 'side']);
+  for (const f of stubs.filter((x) => x.stub === 'side')) near(f.length / IN, 36 - 2.25);
+  near(stubs.find((f) => f.stub === 'end').length / IN, 4.5);
+  assert.match(stubs.find((f) => f.stub === 'end').name, /Stub wall end/);
+  // The stub's footprint on the north face (its sides at 72" ± 2.25", from a face starting at 2.25").
+  const north = faces.find((f) => f.compass === 'North' && !f.stub);
+  assert.equal(north.junctions.length, 1);
+  near(north.junctions[0].s0 / IN, 67.5);
+  near(north.junctions[0].s1 / IN, 72);
+
+  // Whole-house trim reaches the stub, and the north baseboard stops either side of it.
+  edit(d, (x) => applySpecs(x, scopeFaces(designFaces(x), 'house'), [{ category: 'baseboard' }]));
+  for (const f of designFaces(d).filter((x) => x.stub)) assert.equal(resolveFaceTrim(d, f).items[0].pieces.length, 1);
+  const pieces = resolveFaceTrim(d, designFaces(d).find((f) => f.compass === 'North' && !f.stub)).items[0].pieces;
+  assert.deepEqual(pieces.map((p) => [Math.round(p.s0 / IN * 100) / 100, Math.round(p.s1 / IN * 100) / 100]), [[0, 67.5], [72, 139.5]]);
+
+  // On the plan the north baseboard mitres into the stub's, and round the stub's end.
+  const depth = () => 0.75 * IN;
+  const bands = planTrimBands(d, designFaces(d), depth);
+  const corner = (b, x, y) => b.poly.some((p) => Math.abs(p.x / IN - x) < 0.01 && Math.abs(p.y / IN - y) < 0.01);
+  assert.equal(bands.filter((b) => corner(b, 69, 2.25 + 0.75)).length, 2);
+  assert.equal(bands.filter((b) => corner(b, 69, 36.75)).length, 2);
+
+  // Stub faces are addressable (the end as side 'a' or 'b' of the wall) and keep their trim when the stub grows.
+  const end = designFaces(d).find((f) => f.stub === 'end');
+  assert.ok(['a', 'b'].includes(faceRef(end).dir));
+  assert.equal(findFace(designFaces(d), faceRef(end))?.name, end.name);
+  const tip = d.nodes.find((n) => Math.abs(n.x - 6 * FT) < 1 && Math.abs(n.y - 3 * FT) < 1);
+  edit(d, (x) => translateNodes(x, [tip.id], { x: 0, y: FT }));
+  const grown = designFaces(d).filter((f) => f.stub === 'side');
+  for (const f of grown) {
+    near(f.length / IN, 48 - 2.25);
+    near(resolveFaceTrim(d, f).items[0].pieces[0].length / IN, 48 - 2.25);
+  }
+});
+
+test('runs split at openings: a piece taken off stays off when the door moves', () => {
+  const d = room();
+  edit(d, (x) => addOpening(x, northWall(x).id, 'door', 6 * FT, { width: 32 * IN, height: 80 * IN }));
+  addToFace(d, 'North', (x) => makeRun(x, 'baseboard'));
+  const doorId = d.openings[0].id;
+  let r = resolvedFace(d, 'North').items[0];
+  assert.deepEqual(r.pieces.map((p) => p.key), [`start|opening:${doorId}`, `opening:${doorId}|end`]);
+
+  // Take the left piece off: only the right one is left.
+  edit(d, (x) => { x.faceTrim[0].items[0].omit = [r.pieces[0].key]; });
+  r = resolvedFace(d, 'North').items[0];
+  assert.equal(r.pieces.length, 1);
+  near(r.pieces[0].s0 / IN, 72 + 16);
+
+  // Move the door: the left piece is still off, the right one follows the door.
+  edit(d, (x) => { x.openings[0].offset = 4 * FT; });
+  r = resolvedFace(d, 'North').items[0];
+  assert.equal(r.pieces.length, 1);
+  near(r.pieces[0].s0 / IN, 48 + 16);
+  near(r.pieces[0].s1 / IN, 144);
+  // The removal survives saving and loading.
+  const back = migrateDesign(JSON.parse(JSON.stringify(d)));
+  assert.equal(resolvedFace(back, 'North').items[0].pieces.length, 1);
+});
+
+test('casing legs, head and bottom can be taken off one by one; trim runs to the jamb there', () => {
+  const d = room();
+  edit(d, (x) => addOpening(x, northWall(x).id, 'door', 6 * FT, { width: 32 * IN, height: 80 * IN }));
+  addToFace(d, 'North', (x, face) => [makeRun(x, 'baseboard'), makeCasing(x, face.openings[0].opening)]);
+  const ext = REVEAL + 3.5;
+  edit(d, (x) => { x.faceTrim[0].items[1].omit = ['left leg']; });
+  const res = resolvedFace(d, 'North');
+  const casing = res.items.find((i) => i.item.kind === 'casing');
+  assert.deepEqual(casing.pieces.map((p) => p.part).sort(), ['head', 'right leg']);
+  // The head is cut square where the leg was.
+  const head = casing.pieces.find((p) => p.part === 'head');
+  assert.equal(head.poly.filter((q) => Math.abs(q.s / IN - (56 - ext)) < 0.01).length, 2);
+  // Baseboard now runs to the door's left jamb, and still stops at the casing on the right.
+  const base = res.items.find((i) => i.item.kind === 'run').pieces;
+  near(base[0].s1 / IN, 56);
+  near(base[1].s0 / IN, 88 + ext);
+  // On the plan only the right leg is drawn.
+  const legs = planTrimBands(d, designFaces(d), () => 0.75 * IN).filter((b) => b.part === 'leg');
+  assert.equal(legs.length, 1);
+
+  // A picture-frame window without its bottom: the legs stand square on the sill line.
+  const e = room();
+  edit(e, (x) => addOpening(x, northWall(x).id, 'window', 6 * FT, { width: 36 * IN, height: 48 * IN, sill: 36 * IN }));
+  addToFace(e, 'North', (x, face) => makeCasing(x, face.openings[0].opening, { }));
+  edit(e, (x) => { x.faceTrim[0].items[0].omit = ['bottom']; });
+  const w = resolvedFace(e, 'North').items[0];
+  assert.deepEqual(w.pieces.map((p) => p.part).sort(), ['head', 'left leg', 'right leg']);
+  const leg = w.pieces.find((p) => p.part === 'left leg');
+  assert.equal(leg.poly.filter((q) => Math.abs(q.z - leg.poly[0].z) < 0.01).length, 2); // square bottom
 });

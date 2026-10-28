@@ -3,7 +3,7 @@
 // Room records only persist user metadata (name, ceiling); their geometry is
 // always recomputed from the walls, so drawing stays free-form.
 import {
-  add, compassName, dist, dot, closestPointOnSegment, cross, labelPoint, norm, offsetPolygon,
+  add, compassName, dist, dot, closestPointOnSegment, cross, labelPoint, lineIntersection, norm, offsetPolygon,
   perp, pointInPolygon, polygonArea, polygonPerimeter, projectParam, scale, segmentIntersection, sub,
 } from './geometry.js';
 import { MM_PER_IN, formatLength, unitDefaults } from './units.js';
@@ -12,6 +12,7 @@ import { bulkheadDefaults, faceBands, findBulkheadFace, resolveBulkheads } from 
 import { migrateRoomCrown, sanitizeFaceTrim, sanitizePackages, syncFaceTrim } from './trim.js';
 import { sanitizeFloorRuns, syncFloorRuns } from './flooring.js';
 import { sanitizeFurniture } from './furniture.js';
+import { sanitizeAnnotations } from './annotations.js';
 
 export const EPS = 1; // mm: nodes closer than this are the same point
 const MIN_FACE_AREA = 10000; // mm²: anything smaller is a sliver, not a room
@@ -49,6 +50,7 @@ export function createDesign(units = 'imperial') {
     floorRuns: [],
     guides: [],
     furniture: [],
+    annotations: [],
   };
 }
 
@@ -68,6 +70,7 @@ export function migrateDesign(raw) {
   // Ruler guides: { id, axis: 'x' (vertical line at x = v) | 'y' (horizontal line at y = v), v }.
   d.guides = Array.isArray(d.guides) ? d.guides.filter((g) => g && typeof g.id === 'string' && (g.axis === 'x' || g.axis === 'y') && Number.isFinite(g.v)) : [];
   d.furniture = sanitizeFurniture(d.furniture);
+  d.annotations = sanitizeAnnotations(d.annotations);
   // Centreline dimensions were dropped: plans saved with them show interior faces.
   if (!DIMENSION_MODES[d.settings.dimensionMode]) d.settings.dimensionMode = 'interior';
   d.rooms.forEach((r) => {
@@ -752,52 +755,139 @@ function openingsByWallId(d) {
  * the wall and `outward` points from the viewer into the wall.
  */
 function buildFaces(groups, polygon, idx, openingsByWall) {
-  return groups.map((g, i) => {
-    const P = polygon[i];
-    const Q = polygon[(i + 1) % groups.length];
-    const dir = g.segs[0].dir;
-    const length = Math.max(0, dot(sub(Q, P), dir));
-    const outward = scale(perp(dir), -1);
-    const openings = [];
-    for (const s of g.segs) {
-      const w = s.h.wall;
-      const A = idx.nodes.get(w.a);
-      const B = idx.nodes.get(w.b);
-      const wd = norm(sub(B, A));
-      for (const o of openingsByWall.get(w.id) ?? []) {
-        const center = add(A, scale(wd, o.offset));
-        const c = dot(sub(center, P), dir);
-        const bottom = o.type === 'window' ? o.sill : 0;
-        openings.push({ opening: o, s0: c - o.width / 2, s1: c + o.width / 2, bottom, top: bottom + o.height, forward: dot(wd, dir) > 0 });
-      }
+  return groups.map((g, i) => buildFace(g, polygon[i], polygon[(i + 1) % groups.length], idx, openingsByWall, i));
+}
+
+/** One wall face from P to Q along a group of collinear wall segments (see buildFaces). */
+function buildFace(g, P, Q, idx, openingsByWall, index) {
+  const dir = g.segs[0].dir;
+  const length = Math.max(0, dot(sub(Q, P), dir));
+  const outward = scale(perp(dir), -1);
+  const openings = [];
+  for (const s of g.segs) {
+    const w = s.h.wall;
+    const A = idx.nodes.get(w.a);
+    const B = idx.nodes.get(w.b);
+    const wd = norm(sub(B, A));
+    for (const o of openingsByWall.get(w.id) ?? []) {
+      const center = add(A, scale(wd, o.offset));
+      const c = dot(sub(center, P), dir);
+      const bottom = o.type === 'window' ? o.sill : 0;
+      openings.push({ opening: o, s0: c - o.width / 2, s1: c + o.width / 2, bottom, top: bottom + o.height, forward: dot(wd, dir) > 0 });
     }
-    openings.sort((p, q) => p.s0 - q.s0);
-    // Exterior status can vary along a merged face (e.g. partly shared with a neighbour).
-    const segments = g.segs.map((s, k) => ({
-      s0: k === 0 ? 0 : Math.min(length, Math.max(0, dot(sub(s.P, P), dir))),
-      s1: k === g.segs.length - 1 ? length : Math.min(length, Math.max(0, dot(sub(s.Q, P), dir))),
-      exterior: s.exterior,
-      wallId: s.h.wall.id,
-    }));
-    return {
-      index: i,
-      P,
-      Q,
-      dir,
-      length,
-      outward,
-      compass: compassName(outward),
-      thickness: g.segs[0].thickness,
-      exterior: g.segs.some((s) => s.exterior),
-      segments,
-      wallIds: g.segs.map((s) => s.h.wall.id),
-      // Which side of each wall this face is on (half-edge direction: 0 = A→B).
-      sides: g.segs.map((s) => ({ wallId: s.h.wall.id, dir: s.h.dir })),
-      centerP: g.segs[0].P,
-      centerQ: g.segs[g.segs.length - 1].Q,
-      openings,
-    };
-  });
+  }
+  openings.sort((p, q) => p.s0 - q.s0);
+  // Exterior status can vary along a merged face (e.g. partly shared with a neighbour).
+  const segments = g.segs.map((s, k) => ({
+    s0: k === 0 ? 0 : Math.min(length, Math.max(0, dot(sub(s.P, P), dir))),
+    s1: k === g.segs.length - 1 ? length : Math.min(length, Math.max(0, dot(sub(s.Q, P), dir))),
+    exterior: s.exterior,
+    wallId: s.h.wall.id,
+  }));
+  return {
+    index,
+    P,
+    Q,
+    dir,
+    length,
+    outward,
+    compass: compassName(outward),
+    thickness: g.segs[0].thickness,
+    exterior: g.segs.some((s) => s.exterior),
+    segments,
+    wallIds: g.segs.map((s) => s.h.wall.id),
+    // Which side of each wall this face is on (half-edge direction: 0 = A→B).
+    sides: g.segs.map((s) => ({ wallId: s.h.wall.id, dir: s.h.dir })),
+    centerP: g.segs[0].P,
+    centerQ: g.segs[g.segs.length - 1].Q,
+    openings,
+    junctions: [], // spans where a stub wall meets this face: [{ s0, s1, wallId }]
+  };
+}
+
+/**
+ * Faces of stub walls: walls that stick into a room and end free, which the
+ * room outline leaves out. The room's cycle runs up one side of a stub and
+ * back down the other, so each side becomes a face (`stub: 'side'`, split
+ * where the stub turns) and each free end a face across the wall's end
+ * (`stub: 'end'`, addressed as side 'a' or 'b' of the wall: the node it ends
+ * at). Faces end where their line meets the next wall's face, as room
+ * corners do. `junctions` are where each stub meets the walls it grows from
+ * (the half-edges before and after it, and its two base corners), so those
+ * faces can leave a gap for it.
+ */
+function stubFaces(cycle, spurIds, idx, wallInfo, openingsByWall, firstIndex) {
+  const n = cycle.length;
+  const isSpur = cycle.map((h) => spurIds.has(h.wall.id));
+  const faces = [];
+  const junctions = [];
+  if (!isSpur.some(Boolean) || isSpur.every(Boolean)) return { faces, junctions };
+  const seg = (h) => {
+    const P = idx.nodes.get(h.from);
+    const Q = idx.nodes.get(h.to);
+    return { h, P, Q, dir: norm(sub(Q, P)), thickness: h.wall.thickness, exterior: wallInfo.get(h.wall.id).exterior };
+  };
+  // The wall surface on the room side of a half-edge (the perp side, as for room faces).
+  const side = (s, p) => add(p, scale(perp(s.dir), s.thickness / 2));
+  const line = (s) => ({ p: side(s, s.P), d: s.dir });
+  const meet = (a, b, fallback) => lineIntersection(a.p, a.d, b.p, b.d) ?? fallback;
+  for (let k = 0; k < n; k++) {
+    if (isSpur[k] || !isSpur[(k + 1) % n]) continue;
+    const run = [];
+    let m = (k + 1) % n;
+    while (isSpur[m]) {
+      run.push(seg(cycle[m]));
+      m = (m + 1) % n;
+    }
+    const before = line(seg(cycle[k]));
+    const after = line(seg(cycle[m]));
+    // Chains between free ends, where the cycle turns back along the same wall.
+    const chains = [[]];
+    run.forEach((x, i) => {
+      chains[chains.length - 1].push(x);
+      if (i + 1 < run.length && run[i + 1].h.wall === x.h.wall) chains.push([]);
+    });
+    let start = null;
+    let end = null;
+    chains.forEach((chain, c) => {
+      const groups = [];
+      for (const x of chain) {
+        const g = groups[groups.length - 1];
+        const y = g?.segs[0];
+        if (y && Math.abs(cross(y.dir, x.dir)) < 1e-6 && dot(y.dir, x.dir) > 0 && Math.abs(y.thickness - x.thickness) < 0.5) g.segs.push(x);
+        else groups.push({ segs: [x] });
+      }
+      const lines = groups.map((g) => line(g.segs[0]));
+      groups.forEach((g, i) => {
+        const last = g.segs[g.segs.length - 1];
+        const tip = side(last, last.Q);
+        let P = lines[i].p;
+        if (i > 0) P = meet(lines[i - 1], lines[i], P);
+        else if (c === 0) P = meet(before, lines[0], P);
+        let Q = tip;
+        if (i < groups.length - 1) Q = meet(lines[i], lines[i + 1], Q);
+        else if (c === chains.length - 1) Q = meet(lines[i], after, Q);
+        faces.push({ ...buildFace(g, P, Q, idx, openingsByWall, firstIndex + faces.length), stub: 'side' });
+        start ??= P;
+        end = Q;
+      });
+      if (c === chains.length - 1) return;
+      // The free end, from this side round to the other.
+      const x = chain[chain.length - 1];
+      const P = side(x, x.Q);
+      const Q = add(x.Q, scale(perp(x.dir), -x.thickness / 2));
+      const dir = norm(sub(Q, P));
+      const outward = scale(perp(dir), -1);
+      const wall = x.h.wall;
+      faces.push({
+        index: firstIndex + faces.length, P, Q, dir, length: x.thickness, outward, compass: compassName(outward), thickness: x.thickness,
+        exterior: false, segments: [{ s0: 0, s1: x.thickness, exterior: false, wallId: wall.id }], wallIds: [wall.id],
+        sides: [{ wallId: wall.id, dir: wall.a === x.h.to ? 'a' : 'b' }], centerP: x.Q, centerQ: x.Q, openings: [], junctions: [], stub: 'end',
+      });
+    });
+    junctions.push({ before: cycle[k], after: cycle[m], start, end, wallId: run[0].h.wall.id });
+  }
+  return { faces, junctions };
 }
 
 function roomGeometry(face, idx, wallInfo, d) {
@@ -809,7 +899,24 @@ function roomGeometry(face, idx, wallInfo, d) {
   const polygon = offsetPolygon(centerPolygon, groups.map((g) => g.segs[0].thickness / 2));
   const area = polygonArea(polygon);
   if (area <= 0) return null;
-  const walls = buildFaces(groups, polygon, idx, openingsByWallId(d)).map((w) => ({ ...w, kind: 'room' }));
+  const openingsByWall = openingsByWallId(d);
+  const walls = buildFaces(groups, polygon, idx, openingsByWall).map((w) => ({ ...w, kind: 'room' }));
+  // Stub walls get faces of their own, and leave a gap in the faces they grow from.
+  const stubs = stubFaces(face.halfEdges, new Set(spurs.map((w) => w.id)), idx, wallInfo, openingsByWall, walls.length);
+  const faceOf = new Map();
+  groups.forEach((g, i) => g.segs.forEach((x) => faceOf.set(x.h, walls[i])));
+  const at = (f, p) => Math.min(f.length, Math.max(0, dot(sub(p, f.P), f.dir)));
+  const gap = (f, s0, s1, wallId) => s1 - s0 > EPS && f.junctions.push({ s0, s1, wallId });
+  for (const j of stubs.junctions) {
+    const fi = faceOf.get(j.before);
+    const fo = faceOf.get(j.after);
+    if (!fi || !fo) continue;
+    if (fi === fo) gap(fi, at(fi, j.start), at(fi, j.end), j.wallId);
+    else {
+      gap(fi, at(fi, j.start), fi.length, j.wallId);
+      gap(fo, 0, at(fo, j.end), j.wallId);
+    }
+  }
 
   const wallIds = [...new Set(edges.map((h) => h.wall.id))];
   return {
@@ -820,6 +927,7 @@ function roomGeometry(face, idx, wallInfo, d) {
     area,
     perimeter: polygonPerimeter(polygon),
     walls,
+    spurFaces: stubs.faces.map((w) => ({ ...w, kind: 'room' })),
     wallIds,
     spurWallIds: spurs.map((w) => w.id),
     labelPoint: labelPoint(polygon),
@@ -908,6 +1016,8 @@ export function roomElevations(d, geom) {
     model,
     bulkheads,
     walls: geom.walls.map((w) => ({ ...w, profile: wallTopProfile(model, w.P, w.Q), bands: faceBands(w, bulkheads), tray: trayOverWall(model, w.P, w.Q) })),
+    // Stub walls inside the room (no tray edge runs along them).
+    spurs: (geom.spurFaces ?? []).map((w) => ({ ...w, profile: wallTopProfile(model, w.P, w.Q), bands: faceBands(w, bulkheads), tray: null })),
   };
 }
 
@@ -929,7 +1039,7 @@ export function addBulkhead(d, roomId, wallId) {
 /** Every wall face that runs along a wall: room faces (dead space included) and exterior faces. */
 export function facesOfWall(analysis, wallId) {
   const faces = [];
-  for (const g of analysis.rooms) for (const f of g.walls) if (f.wallIds.includes(wallId)) faces.push({ ...f, room: g });
+  for (const g of analysis.rooms) for (const f of [...g.walls, ...g.spurFaces]) if (f.wallIds.includes(wallId)) faces.push({ ...f, room: g });
   for (const f of analysis.exteriorFaces) if (f.wallIds.includes(wallId)) faces.push({ ...f, room: null });
   return faces;
 }

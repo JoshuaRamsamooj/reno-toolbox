@@ -9,6 +9,7 @@ import { analyzeLeveling, resolveCompound } from './leveling.js';
 import { designFaces } from './faces.js';
 import { BUY_UNITS, FLOOR_KINDS, FLOOR_PRESETS, layoutRun, runLayer } from './flooring.js';
 import { mergeTrimLines, trimTakeoff } from './trim.js';
+import { CUT_MODES, cutMode, formatStock, trimCutPlan } from './trimCuts.js';
 import { furnitureMaterials } from './furniture.js';
 import { TRIM_CATEGORIES, getProfile, profileLabel } from './trimCatalog.js';
 import { MM2_PER_FT2, MM2_PER_M2, MM_PER_FT, areaValue, areaUnit, formatLength, lengthValue } from './units.js';
@@ -24,7 +25,9 @@ export function estimateDefaults(units) {
     trimWaste: 10,
     insulateCeilings: true,
     drywallSheet: units === 'metric' ? { w: 1200, h: 2400 } : { w: 4 * MM_PER_FT, h: 8 * MM_PER_FT },
-    trimLength: units === 'metric' ? 4800 : 16 * MM_PER_FT,
+    trimLength: units === 'metric' ? 4800 : 16 * MM_PER_FT, // default stock length
+    stockLengths: {}, // stock length per trim line key, overriding trimLength and the catalog
+    trimOptimize: false, // cut trim for the fewest joins rather than the least material
     paintCoats: 2,
     paintCoverage: { imperial: 350, metric: 10 }, // sq ft per gallon, m² per litre
     prices: {}, // unit price per material line, by line key
@@ -36,7 +39,18 @@ export function estimateDefaults(units) {
 export function resolveEstimate(d) {
   const def = estimateDefaults(d.units);
   const e = d.estimate ?? {};
-  return { ...def, ...e, paintCoverage: { ...def.paintCoverage, ...(e.paintCoverage ?? {}) }, prices: { ...(e.prices ?? {}) } };
+  return {
+    ...def, ...e, paintCoverage: { ...def.paintCoverage, ...(e.paintCoverage ?? {}) }, prices: { ...(e.prices ?? {}) }, stockLengths: { ...(e.stockLengths ?? {}) },
+  };
+}
+
+/**
+ * A material line's quantity before its waste allowance (or contingency):
+ * `net` where the line has one, else the quantity itself. Whole pieces stay
+ * whole: the sheets, lengths or bags actually needed.
+ */
+export function netQuantity(m) {
+  return m.net ?? m.quantity;
 }
 
 /** A material line's quantity as listed (whole pieces, or one decimal), which is what gets priced. */
@@ -140,7 +154,9 @@ function measureFace(q, length, profile, openings, segments, bands = []) {
 export function computeTakeoff(d) {
   const analysis = analyze(d);
   const idx = indexDesign(d);
-  const trim = trimTakeoff(d, designFaces(d, analysis));
+  const faces = designFaces(d, analysis);
+  const trim = trimTakeoff(d, faces);
+  const cuts = cutSummaryFor(d, faces, trim);
   // Dead space is drawn but never finished: no floor, walls, ceiling, trim or leveling.
   const rooms = analysis.rooms.filter((g) => !g.dead).map((g) => {
     const q = emptyQuantities();
@@ -190,11 +206,12 @@ export function computeTakeoff(d) {
   const laidOut = new Set((d.floorRuns ?? []).filter((run) => runLayer(run) === 'finish').flatMap((run) => run.roomIds));
   const flooredArea = rooms.filter((r) => r.flooring && !laidOut.has(r.id)).reduce((s, r) => s + r.q.floorArea, 0);
 
-  const materials = [...materialList(d, totals, flooredArea, laidOut.size > 0), ...floorMaterials(d, floorRuns), ...trimMaterials(d, trim.totals), ...levelingMaterials(d, rooms), ...doorMaterials(d), ...furnitureMaterials(d, analysis)];
+  const materials = [...materialList(d, totals, flooredArea, laidOut.size > 0), ...floorMaterials(d, floorRuns), ...cuts.byMode[cuts.mode].materials, ...levelingMaterials(d, rooms), ...doorMaterials(d), ...furnitureMaterials(d, analysis)];
   return {
     rooms,
     totals,
     trim,
+    cuts,
     floorRuns,
     materials,
     pricing: priceMaterials(d, materials),
@@ -222,6 +239,7 @@ function floorMaterials(d, layouts) {
       category: r.layer === 'subfloor' ? 'Subfloor' : 'Flooring',
       label: `${product} – ${r.name} (${l.region.geoms.map((g) => g.room.name).join(', ')})`,
       quantity: m.boxes,
+      net: Math.ceil(m.stock / r.perBox - 1e-9),
       unit: BUY_UNITS[r.unit][1],
       detail: `${r.perBox > 1 ? `${pieces}, ${r.perBox} per ${BUY_UNITS[r.unit][0]}` : pieces} · ${A(m.netArea).toFixed(1)} ${aUnit} covered, ${A(m.coverage).toFixed(1)} ${aUnit} bought`,
       floor: { runId: r.id, pieces: m.order, netArea: m.netArea, coverage: m.coverage },
@@ -232,35 +250,94 @@ function floorMaterials(d, layouts) {
 const TRIM_ORDER = Object.keys(TRIM_CATEGORIES);
 
 /**
- * Assigned trim, one line per profile and size: linear profiles in lf/m and
- * stock pieces, area goods in sq ft/m², sheet goods in whole sheets.
+ * The trim cut plan (see core/trimCuts.js) with the trim material lines and
+ * their pricing under each plan, so the two can be compared:
+ * { plan, mode, byMode: { material, joins: { materials, pricing } } }.
  */
-function trimMaterials(d, lines) {
+export function trimCutSummary(d, analysis = analyze(d)) {
+  const faces = designFaces(d, analysis);
+  return cutSummaryFor(d, faces, trimTakeoff(d, faces));
+}
+
+function cutSummaryFor(d, faces, trim) {
+  const e = resolveEstimate(d);
+  const plan = trimCutPlan(d, faces, { trimLength: e.trimLength, stockLengths: e.stockLengths });
+  const byMode = {};
+  for (const mode of Object.keys(CUT_MODES)) {
+    const materials = trimMaterials(d, trim.totals, plan, mode);
+    byMode[mode] = { materials, pricing: priceMaterials(d, materials) };
+  }
+  return { plan, mode: cutMode(d), byMode };
+}
+
+/**
+ * Assigned trim, one line per profile and size. Trim in the cut plan is
+ * bought in whole lengths of stock (sticks, boards or sheets) from the plan
+ * for `mode`, plus the trim waste allowance rounded up to whole pieces:
+ * linear profiles in lf/m, shiplap in sq ft/m² of boards, sheet goods in
+ * sheets. Anything else (board and batten) is its net area plus waste.
+ * Cut-plan lines carry `cuts`: { mode, count (from the plan), order (to
+ * buy), spare (order − count), joins, stock, leftover }, where leftover is
+ * what is bought less what is installed (offcuts plus spare stock): mm of
+ * stock, or mm² for sheet goods.
+ */
+function trimMaterials(d, lines, plan, mode) {
   const e = resolveEstimate(d);
   const u = d.units;
   const L = (mm) => lengthValue(mm, u);
   const A = (mm2) => areaValue(mm2, u);
   const withWaste = (v) => v * (1 + e.trimWaste / 100);
+  const order = (count) => (count > 0 ? Math.ceil(withWaste(count) - 1e-9) : 0);
   const lUnit = u === 'metric' ? 'm' : 'lf';
   const aUnit = areaUnit(u);
-  const pieceLabel = u === 'metric' ? `${(e.trimLength / 1000).toFixed(1)} m` : `${Math.round(e.trimLength / MM_PER_FT)}'`;
+  const plural = (k, word) => `${k} ${word}${k === 1 ? '' : 's'}`;
   const sorted = [...lines].sort((p, q) => TRIM_ORDER.indexOf(p.category) - TRIM_ORDER.indexOf(q.category) || p.size - q.size);
   return sorted.map((l) => {
     const label = `${TRIM_CATEGORIES[l.category]?.label ?? 'Trim'} – ${profileLabel(l.profileId, l.size, u, l.category)}`;
     const base = { key: `trim:${l.key}`, category: 'Trim', label, trim: l };
+    const groups = plan.groups.filter((g) => g.lineKey === l.key);
+    if (groups.length) {
+      const plans = groups.map((g) => g.plans[mode]);
+      const count = plans.reduce((s, p) => s + p.count, 0);
+      const joins = plans.reduce((s, p) => s + p.joins, 0);
+      const g = groups[0];
+      const why = `${CUT_MODES[mode].toLowerCase()}, ${plural(joins, 'join')}, + ${e.trimWaste}% waste`;
+      if (g.kind === 'sheet') {
+        const sheets = plans.reduce((s, p) => s + p.sheets, 0);
+        const qty = order(sheets);
+        const leftover = Math.max(0, qty * g.size * g.sheetLength - l.area);
+        return {
+          ...base, quantity: qty, net: sheets, unit: 'sheets', cuts: { mode, count: sheets, order: qty, spare: qty - sheets, joins, stock: g.stock, leftover },
+          detail: `${plural(sheets, 'sheet')} from the cut plan (${plural(count, 'panel')}, ${why}) · ${A(l.area).toFixed(1)} ${aUnit} net`,
+        };
+      }
+      const qty = order(count);
+      const net = groups.reduce((s, x) => s + x.net, 0);
+      const cuts = { mode, count, order: qty, spare: qty - count, joins, stock: g.stock, leftover: Math.max(0, qty * g.stock - net) };
+      if (g.kind === 'boards') {
+        return {
+          ...base, quantity: A(qty * g.size * g.stock), net: A(count * g.size * g.stock), unit: aUnit, cuts,
+          detail: `${qty} × ${formatStock(g.stock, u)} boards (${count} from the cut plan, ${why}) · ${A(l.area).toFixed(1)} ${aUnit} net`,
+        };
+      }
+      return {
+        ...base, quantity: L(qty * g.stock), net: L(count * g.stock), unit: lUnit, cuts,
+        detail: `${qty} × ${formatStock(g.stock, u)} (${count} from the cut plan, ${why}) · net ${L(l.length).toFixed(1)} ${lUnit} in ${plural(l.pieces, 'piece')}`,
+      };
+    }
     if (l.unit === 'sheet') {
       const sheet = l.size * (getProfile(l.profileId)?.sheetLength ?? 0);
       return {
-        ...base, quantity: sheet > 0 ? Math.ceil(withWaste(l.area) / sheet - 1e-9) : 0, unit: 'sheets',
+        ...base, quantity: sheet > 0 ? Math.ceil(withWaste(l.area) / sheet - 1e-9) : 0, net: sheet > 0 ? Math.ceil(l.area / sheet - 1e-9) : 0, unit: 'sheets',
         detail: `${A(l.area).toFixed(1)} ${aUnit} net + ${e.trimWaste}% waste`,
       };
     }
     if (l.unit === 'sf') {
-      return { ...base, quantity: A(withWaste(l.area)), unit: aUnit, detail: `${A(l.area).toFixed(1)} ${aUnit} net + ${e.trimWaste}% waste` };
+      return { ...base, quantity: A(withWaste(l.area)), net: A(l.area), unit: aUnit, detail: `${A(l.area).toFixed(1)} ${aUnit} net + ${e.trimWaste}% waste` };
     }
     return {
-      ...base, quantity: L(withWaste(l.length)), unit: lUnit,
-      detail: `${Math.ceil(withWaste(l.length) / e.trimLength - 1e-9)} × ${pieceLabel} pieces (net ${L(l.length).toFixed(1)} ${lUnit} in ${l.pieces} piece${l.pieces === 1 ? '' : 's'} + ${e.trimWaste}% waste)`,
+      ...base, quantity: L(withWaste(l.length)), net: L(l.length), unit: lUnit,
+      detail: `net ${L(l.length).toFixed(1)} ${lUnit} in ${plural(l.pieces, 'piece')} + ${e.trimWaste}% waste`,
     };
   });
 }
@@ -281,7 +358,7 @@ function levelingMaterials(d, rooms) {
     const pouring = surveyed.filter((r) => r.leveling.rawBags > 0).map((r) => r.name).join(', ');
     items.push({
       key: 'self-leveler', category: 'Leveling', label: `Self-leveling compound – ${product.name} (${product.bag})`,
-      quantity: Math.ceil(raw * (1 + contingency / 100) - 1e-9), unit: 'bags',
+      quantity: Math.ceil(raw * (1 + contingency / 100) - 1e-9), net: Math.ceil(raw - 1e-9), unit: 'bags',
       detail: `${A(fillArea).toFixed(1)} ${aUnit} pour in ${pouring} + ${contingency}% contingency`,
     });
   }
@@ -358,27 +435,27 @@ function materialList(d, t, flooredArea, hasLayouts = false) {
   const items = [
     ...(hasLayouts && flooredArea <= 0 ? [] : [{
       key: 'flooring', category: 'Flooring', label: hasLayouts ? 'Flooring – rooms without a layout' : 'Flooring',
-      quantity: A(withWaste(flooredArea, e.flooringWaste)), unit: aUnit,
+      quantity: A(withWaste(flooredArea, e.flooringWaste)), net: A(flooredArea), unit: aUnit,
       detail: `${A(flooredArea).toFixed(1)} ${aUnit} net + ${e.flooringWaste}% waste`,
     }]),
     {
       key: 'drywall', category: 'Drywall', label: `Drywall sheets (${sheetLabel})`,
-      quantity: Math.ceil(withWaste(drywallArea, e.drywallWaste) / sheetArea - 1e-9), unit: 'sheets',
+      quantity: Math.ceil(withWaste(drywallArea, e.drywallWaste) / sheetArea - 1e-9), net: Math.ceil(drywallArea / sheetArea - 1e-9), unit: 'sheets',
       detail: `${A(t.wallNet).toFixed(1)} ${aUnit} walls + ${A(t.ceilingArea).toFixed(1)} ${aUnit} ceilings${bulkheadNote} + ${e.drywallWaste}% waste`,
     },
     ...(t.bulkheadBead > 0 ? [{
       key: 'corner-bead', category: 'Drywall', label: 'Corner bead – bulkheads',
-      quantity: L(withWaste(t.bulkheadBead, e.trimWaste)), unit: lUnit,
+      quantity: L(withWaste(t.bulkheadBead, e.trimWaste)), net: L(t.bulkheadBead), unit: lUnit,
       detail: `${L(t.bulkheadBead).toFixed(1)} ${lUnit} of outside corners + ${e.trimWaste}% waste`,
     }] : []),
     {
       key: 'insulation-walls', category: 'Insulation', label: 'Insulation – exterior walls',
-      quantity: A(withWaste(t.exteriorWallNet, e.insulationWaste)), unit: aUnit,
+      quantity: A(withWaste(t.exteriorWallNet, e.insulationWaste)), net: A(t.exteriorWallNet), unit: aUnit,
       detail: `${A(t.exteriorWallNet).toFixed(1)} ${aUnit} net exterior wall + ${e.insulationWaste}% waste`,
     },
     {
       key: 'insulation-ceilings', category: 'Insulation', label: 'Insulation – ceilings',
-      quantity: A(withWaste(ceilingInsulation, e.insulationWaste)), unit: aUnit,
+      quantity: A(withWaste(ceilingInsulation, e.insulationWaste)), net: A(ceilingInsulation), unit: aUnit,
       detail: e.insulateCeilings ? `${A(t.ceilingInsulation).toFixed(1)} ${aUnit} ceiling + ${e.insulationWaste}% waste` : 'Disabled in estimate settings',
     },
     {
@@ -409,21 +486,39 @@ export function takeoffToCsv(d, takeoff) {
   rows.push([]);
   const pricing = takeoff.pricing ?? priceMaterials(d, takeoff.materials);
   const money = (v) => (v == null ? '' : v.toFixed(2));
-  rows.push(['Material', 'Quantity', 'Unit', 'Unit price', 'Total', 'Notes']);
+  rows.push(['Material', 'Without waste', 'Quantity', 'Unit', 'Unit price', 'Total', 'Notes']);
   takeoff.materials.forEach((m, i) => {
     const line = pricing.lines[i];
-    rows.push([m.label, m.quantity.toFixed(COUNT_UNITS.has(m.unit) ? 0 : 2), m.unit, money(line.unitPrice), money(line.cost), m.detail]);
+    const digits = COUNT_UNITS.has(m.unit) ? 0 : 2;
+    rows.push([m.label, netQuantity(m).toFixed(digits), m.quantity.toFixed(digits), m.unit, money(line.unitPrice), money(line.cost), m.detail]);
   });
   if (pricing.priced) {
-    rows.push(['Subtotal', '', '', '', money(pricing.subtotal), `${pricing.priced} of ${pricing.lines.length} lines priced`]);
-    rows.push([`Tax (${pricing.taxRate}%)`, '', '', '', money(pricing.tax), '']);
-    rows.push(['Total', '', '', '', money(pricing.total), pricing.currency]);
+    rows.push(['Subtotal', '', '', '', '', money(pricing.subtotal), `${pricing.priced} of ${pricing.lines.length} lines priced`]);
+    rows.push([`Tax (${pricing.taxRate}%)`, '', '', '', '', money(pricing.tax), '']);
+    rows.push(['Total', '', '', '', '', money(pricing.total), pricing.currency]);
   }
   if (takeoff.trim?.lines.length) {
     rows.push([]);
     rows.push(['Trim by wall face', 'Item', `Length (${lU})`, `Area (${aU})`, 'Estimate unit']);
     for (const l of takeoff.trim.lines) {
       rows.push([l.face, `${TRIM_CATEGORIES[l.category]?.label ?? 'Trim'} – ${profileLabel(l.profileId, l.size, u, l.category)}`, L(l.length), l.unit === 'lf' ? '' : A(l.area), l.unit]);
+    }
+  }
+  const cuts = takeoff.cuts;
+  if (cuts?.plan.groups.length) {
+    rows.push([]);
+    rows.push([`Trim cut list (${CUT_MODES[cuts.mode].toLowerCase()})`, 'Trim', `Stock (${lU})`, `Cut (${lU})`, 'Where', `Offcut (${lU})`]);
+    for (const g of cuts.plan.groups) {
+      const p = g.plans[cuts.mode];
+      const name = `${TRIM_CATEGORIES[g.category]?.label ?? 'Trim'} – ${profileLabel(g.profileId, g.size, u, g.category)}`;
+      for (const st of p.sticks) {
+        st.cuts.forEach((c, i) => {
+          const segs = p.segments.get(c.piece.id) ?? [];
+          const k = segs.findIndex((sg) => Math.abs(sg.t0 - c.t0) < 0.01);
+          const where = `${c.piece.faceName}, ${c.piece.part}${segs.length > 1 ? ` (${k + 1} of ${segs.length})` : ''}`;
+          rows.push([i ? '' : st.tag, i ? '' : name, i ? '' : L(g.stock), L(c.length), where, i ? '' : L(st.offcut)]);
+        });
+      }
     }
   }
   return rows.map((r) => r.map(esc).join(',')).join('\n');

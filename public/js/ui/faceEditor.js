@@ -7,7 +7,10 @@
 // live drag, so it is all undoable.
 import { analyze, doorStyle } from '../core/model.js';
 import { profileHeightAt } from '../core/ceiling.js';
-import { designFaces, faceKey, faceRef, findFace, parseFaceKey } from '../core/faces.js';
+import { designFaces, faceKey, faceRef, faceTitle, findFace, parseFaceKey } from '../core/faces.js';
+import { faceCutMarks } from '../core/trimCuts.js';
+import { cutMarksSvg, cutToggles } from './cutPlan.js';
+import { obstructionSvg } from './elevationView.js';
 import {
   drawOrder, ensureRecord, faceTrimLines, isTrayCrown, itemLabel, layoutBoxes, specKey, makeBox, makeCasing, makeRun, makeWainscot, parseTrimDimensions, parseTrimLength,
   recordForFace, resolveFaceTrim, specFromItem, specsFromRecord, trimDefaults,
@@ -29,7 +32,7 @@ const TYPABLE = /^[0-9.'"\/\- xXmMcC]$/;
 const HANDLE = 5; // px half-size
 
 export const FACE_TOOLS = {
-  select: { label: 'Select', key: 'V', hint: 'Click trim to select · drag to move, drag handles to resize or trim a run · Del deletes (Shift+Del: that kind from the whole room) · X removes the clicked piece of a run · arrows nudge (Shift = more) · type a value + Enter to set a selected rail, wainscot or box · drag from a ruler for a guide, Shift+drag a guide to pull another off it (type a distance + Enter)' },
+  select: { label: 'Select', key: 'V', hint: 'Click trim to select one piece (a run between openings, a casing leg or head) · drag to move, drag handles to resize or trim a run · Del removes the clicked piece, or the whole item when it is the last (Shift+Del: that kind from the whole room) · arrows nudge (Shift = more) · type a value + Enter to set a selected rail, wainscot or box · drag from a ruler for a guide, Shift+drag a guide to pull another off it (type a distance + Enter)' },
   baseboard: { label: 'Baseboard', key: 'B', category: 'baseboard', hint: 'Click to run baseboard along the whole face (gaps at doors are automatic) · drag to draw a partial run' },
   shoe: { label: 'Shoe', key: 'H', category: 'shoe', hint: 'Click to run shoe moulding (or quarter round) along the floor at the foot of the baseboard · gaps at doors and stops at casing like baseboard · drag for a partial run' },
   crown: { label: 'Crown', key: 'C', category: 'crown', hint: 'Click to run crown along the ceiling (follows slopes, gaps at bulkheads) · click inside a dashed tray outline for crown in the tray · drag for a partial run' },
@@ -217,6 +220,12 @@ export class FaceEditor {
       z.push({ v: env.top, label: 'top of casing' });
       if (env.op.opening.type === 'window') z.push({ v: env.bottom, label: 'bottom of window trim' });
     }
+    for (const ob of resolved.obstructions ?? []) {
+      const label = ob.name.toLowerCase();
+      s.push({ v: ob.s0, label }, { v: ob.s1, label });
+      z.push({ v: ob.top, label: `top of ${label}` });
+      if (ob.bottom > 0) z.push({ v: ob.bottom, label: `bottom of ${label}` });
+    }
     for (const b of face.bands ?? []) {
       s.push({ v: b.s0, label: 'bulkhead' }, { v: b.s1, label: 'bulkhead' });
       z.push({ v: b.bottom, label: 'bulkhead' });
@@ -354,7 +363,7 @@ export class FaceEditor {
         const bb = screenBox(poly);
         const thin = bb.w < 8 || bb.h < 8;
         if (pointInPoly(p, poly) || (thin && p.x >= bb.x0 - 4 && p.x <= bb.x1 + 4 && p.y >= bb.y0 - 4 && p.y <= bb.y1 + 4)) {
-          return { r, seg: r.item.kind === 'run' ? i : null };
+          return { r, seg: r.item.kind === 'run' || r.item.kind === 'casing' ? i : null };
         }
       }
     }
@@ -648,6 +657,8 @@ export class FaceEditor {
       if (e.shiftKey && spec && this.ctx.face.kind === 'room') {
         this.sel = null;
         removeFromScope(this.app, specKey(spec), 'room', { face: this.ctx.face });
+      } else if (this.sel.seg != null && r.pieces[this.sel.seg]) {
+        this.removePiece(r, this.sel.seg);
       } else {
         this.deleteItem(r.item.id);
       }
@@ -659,8 +670,8 @@ export class FaceEditor {
       return true;
     }
     if (mod) return false;
-    if (k.toLowerCase() === 'x' && r?.item.kind === 'run' && this.sel.seg != null) {
-      this.cutSegment(r, this.sel.seg);
+    if (k.toLowerCase() === 'x' && r && this.sel.seg != null && r.pieces[this.sel.seg]) {
+      this.removePiece(r, this.sel.seg);
       return true;
     }
     if (k.startsWith('Arrow') && r) {
@@ -746,10 +757,30 @@ export class FaceEditor {
     this.app.refresh();
   }
 
-  cutSegment(r, seg) {
+  /**
+   * Takes one piece off: a run's piece between openings (remembered by what
+   * bounds it, so it stays off when the openings move), a casing leg, head or
+   * bottom, or a window's stool, apron or sill. The last piece deletes the item.
+   */
+  removePiece(r, seg) {
     const piece = r.pieces[seg];
     if (!piece) return;
-    this.editItem(r.item.id, 'Remove piece of run', (x) => { x.cuts = [...(x.cuts ?? []), { s0: piece.s0, s1: piece.s1 }]; });
+    if (r.pieces.length === 1) {
+      this.deleteItem(r.item.id);
+      return;
+    }
+    if (r.item.kind === 'casing') {
+      const part = piece.part;
+      this.editItem(r.item.id, `Remove ${part}`, (x) => {
+        if (['stool', 'apron', 'sill'].includes(part)) x[part] = null;
+        else x.omit = [...new Set([...(x.omit ?? []), part])];
+      });
+    } else if (piece.key && !piece.key.includes('cut')) {
+      this.editItem(r.item.id, 'Remove piece of run', (x) => { x.omit = [...new Set([...(x.omit ?? []), piece.key])]; });
+    } else {
+      // Bounded by a positional cut: remove it by position as well.
+      this.editItem(r.item.id, 'Remove piece of run', (x) => { x.cuts = [...(x.cuts ?? []), { s0: piece.s0, s1: piece.s1 }]; });
+    }
     this.sel = { id: r.item.id, seg: null };
   }
 
@@ -824,7 +855,7 @@ export class FaceEditor {
       h('div', { class: 'face-groups' }, [...groups].map(([name, list]) => h('div', { class: 'face-group' },
         h('h3', {}, name),
         list.map((f) => h('button', { class: 'face-pick', onclick: () => this.app.openFace(faceRef(f)) },
-          h('span', {}, f.kind === 'room' ? `${f.number}. ${f.compass} wall` : `${f.number}. ${f.compass} face`),
+          h('span', {}, f.kind === 'room' ? faceTitle(f, f.number) : `${f.number}. ${f.compass} face`),
           h('span', { class: 'muted small' }, ` ${formatLength(f.length, this.units, { precision: 'label' })}`),
           faceSummary(this.design, f) ? h('span', { class: 'chip small' }, faceSummary(this.design, f)) : null))))),
     ];
@@ -845,7 +876,7 @@ export class FaceEditor {
     for (const [name, list] of groups) {
       options.push(h('optgroup', { label: name }, list.map((f) => {
         const key = faceKey(faceRef(f));
-        return h('option', { value: key, selected: key === current }, `${f.number}. ${f.compass} ${f.kind === 'room' ? 'wall' : 'face'} · ${formatLength(f.length, u, { precision: 'label' })}${recordForFace(this.design, f) ? ' ●' : ''}`);
+        return h('option', { value: key, selected: key === current }, `${f.kind === 'room' ? faceTitle(f, f.number) : `${f.number}. ${f.compass} face`} · ${formatLength(f.length, u, { precision: 'label' })}${recordForFace(this.design, f) ? ' ●' : ''}`);
       })));
     }
     const picker = h('select', { class: 'face-select' }, options);
@@ -867,6 +898,7 @@ export class FaceEditor {
         f && f.openings.length ? h('span', { class: 'chip' }, `${f.openings.length} opening${f.openings.length > 1 ? 's' : ''}`) : null,
         f?.kind === 'exterior' ? h('span', { class: 'chip ext' }, 'exterior side') : null,
         h('span', { class: 'spacer' }),
+        f && this.design.faceTrim.length ? cutToggles(this.app) : null,
         h('button', { onclick: () => this.app.showTab('plan') }, '← Plan'),
       ),
       h('div', { class: 'fe-row' },
@@ -914,6 +946,12 @@ export class FaceEditor {
     const top = Math.max(...face.profile.map((p) => p.z));
     out.push(this.canvas.gridSvg({ clip: 'fe-clip', bounds: { minX: 0, maxX: face.length, minY: 0, maxY: top } }));
     out.push(`<line class="fe-floor" x1="${n(this.X(0) - 30)}" y1="${n(this.Y(0))}" x2="${n(this.X(face.length) + 30)}" y2="${n(this.Y(0))}"/>`);
+    // Stub walls meeting this face, coming out toward the viewer.
+    for (const j of face.junctions ?? []) {
+      const ss = [j.s0, ...face.profile.map((p) => p.s).filter((s) => s > j.s0 && s < j.s1), j.s1];
+      const top = ss.map((s) => `${n(this.X(s))},${n(this.Y(profileHeightAt(face.profile, s)))}`).reverse();
+      out.push(`<polygon class="fe-junction" points="${n(this.X(j.s0))},${n(this.Y(0))} ${n(this.X(j.s1))},${n(this.Y(0))} ${top.join(' ')}"><title>Stub wall</title></polygon>`);
+    }
     for (const b of face.bands ?? []) {
       const ss = [b.s0, ...face.profile.map((p) => p.s).filter((s) => s > b.s0 && s < b.s1), b.s1];
       const top = ss.map((s) => `${n(this.X(s))},${n(this.Y(Math.max(b.bottom, profileHeightAt(face.profile, s))))}`);
@@ -956,6 +994,9 @@ export class FaceEditor {
   renderTrim(c) {
     const out = [];
     const u = this.units;
+    const cuts = this.app.showTrimCuts && c.resolved.items.length ? this.app.trimCuts() : null;
+    const marks = cuts ? faceCutMarks(cuts.plan, cuts.mode, faceKey(faceRef(c.face))) : null;
+    for (const ob of c.resolved.obstructions ?? []) out.push(obstructionSvg(ob, (v) => this.X(v), (v) => this.Y(v), c.face.profile, 'fe'));
     for (const r of drawOrder(c.resolved.items)) {
       const it = r.item;
       const selected = this.sel?.id === it.id;
@@ -966,7 +1007,8 @@ export class FaceEditor {
         const segSel = selected && this.sel.seg === i ? ' seg' : '';
         const pat = p.marks ? ` pat-${p.marks.pattern}` : '';
         out.push(`<path class="${cls}${segSel}${pat}" fill-rule="evenodd" d="${this.piecePath(p.poly, holes)}"/>`);
-        if (p.marks) out.push(wainscotMarksSvg(p.marks, (v) => this.X(v), (v) => this.Y(v), this.view.scale));
+        const wmarks = p.marks && marks ? { ...p.marks, lines: p.marks.lines.filter((l) => l.kind !== 'seam') } : p.marks;
+        if (wmarks) out.push(wainscotMarksSvg(wmarks, (v) => this.X(v), (v) => this.Y(v), this.view.scale));
       });
       // Always-on labels: heights of rails and wainscot, sizes of boxes.
       if (it.kind === 'run' && it.category === 'chair-rail' && r.pieces.length) {
@@ -978,6 +1020,7 @@ export class FaceEditor {
         if (it.w * this.view.scale > label.length * 6 + 10 && it.h * this.view.scale > 30) out.push(text(this.X(it.s + it.w / 2), this.Y(it.z + it.h / 2), label, 'fe-label', 'middle', true));
       }
     }
+    if (marks) out.push(cutMarksSvg(marks, (v) => this.X(v), (v) => this.Y(v), this.view.scale));
     return out.join('');
   }
 
@@ -1298,10 +1341,11 @@ export class FaceEditor {
       fields.push(h('ul', { class: 'trim-list' }, r.pieces.map((p, i) => h('li', { class: this.sel.seg === i ? 'active' : '' },
         h('button', { class: 'link', onclick: () => { this.sel = { id: it.id, seg: i }; this.app.inspector.render(); this.renderCanvas(); } }, `${formatLength(p.s0, u, { precision: 'label' })} → ${formatLength(p.s1, u, { precision: 'label' })}`),
         h('span', { class: 'qty' }, formatLength(p.length, u, { precision: 'label' })),
-        h('button', { class: 'link danger', title: 'Remove this piece (X)', onclick: () => this.cutSegment(r, i) }, '✕')))));
+        h('button', { class: 'link danger', title: 'Remove this piece (Del or X)', onclick: () => this.removePiece(r, i) }, '✕')))));
       const gaps = r.gaps.filter((g) => g.reason !== 'bulkhead').length;
-      fields.push(h('p', { class: 'muted small' }, `${gaps ? `Gaps at ${gaps} opening${gaps > 1 ? 's' : ''} are automatic and follow them. ` : ''}Drag the end handles to shorten the run.`));
-      if (it.cuts?.length) fields.push(h('button', { class: 'link', onclick: () => edit('Restore run', (x) => { x.cuts = []; }) }, `Restore ${it.cuts.length} removed piece${it.cuts.length > 1 ? 's' : ''}`));
+      fields.push(h('p', { class: 'muted small' }, `${gaps ? `The run is split at ${gaps} gap${gaps > 1 ? 's' : ''} (openings, stub walls, built-ins); the gaps follow them. ` : ''}Remove a piece with ✕ or Del: it stays off when openings move. Drag the end handles to shorten the run.`));
+      const removed = (it.omit?.length ?? 0) + (it.cuts?.length ?? 0);
+      if (removed) fields.push(h('button', { class: 'link', onclick: () => edit('Restore run', (x) => { x.cuts = []; delete x.omit; }) }, `Restore ${removed} removed piece${removed > 1 ? 's' : ''}`));
     } else if (it.kind === 'casing') {
       const o = r.op.opening;
       fields.push(field('Reveal (set back from the jamb)', lengthInput(it.reveal, u, (mm) => edit('Casing reveal', (x) => { x.reveal = mm; }), opts())));
@@ -1320,8 +1364,14 @@ export class FaceEditor {
           (key, pick) => edit(`Window ${key}`, (x) => { x[key] = { ...x[key], ...pick }; })));
         fields.push(h('p', { class: 'muted small' }, it.stool ? 'Stool replaces the bottom casing; the legs stand on it.' : 'Without a stool the casing is a picture frame on all four sides.'));
       }
-      fields.push(h('h3', {}, 'Pieces'));
-      fields.push(h('ul', { class: 'trim-list' }, r.pieces.map((p) => h('li', {}, h('span', {}, p.part), h('span', { class: 'qty' }, formatLength(p.length, u, { precision: 'label' }))))));
+      fields.push(h('h3', {}, `Pieces (${r.pieces.length})`));
+      fields.push(h('ul', { class: 'trim-list' }, r.pieces.map((p, i) => h('li', { class: this.sel.seg === i ? 'active' : '' },
+        h('button', { class: 'link', onclick: () => { this.sel = { id: it.id, seg: i }; this.app.inspector.render(); this.renderCanvas(); } }, p.part),
+        h('span', { class: 'qty' }, formatLength(p.length, u, { precision: 'label' })),
+        h('button', { class: 'link danger', title: 'Remove this piece (Del or X)', onclick: () => this.removePiece(r, i) }, '✕')))));
+      if (it.omit?.length) {
+        fields.push(h('button', { class: 'link', onclick: () => edit('Restore casing', (x) => { delete x.omit; }) }, `Restore ${it.omit.join(', ')}`));
+      }
     } else if (it.kind === 'box') {
       fields.push(h('div', { class: 'field-row' },
         field('From left', lengthInput(it.s, u, (mm) => edit('Move box', (x) => { x.s = mm; }), opts({ min: -Infinity }))),

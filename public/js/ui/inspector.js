@@ -12,7 +12,8 @@ import {
 import { MM_PER_IN, formatArea, formatDeviation, formatLength, formatLinear, unitDefaults } from '../core/units.js';
 import { dist } from '../core/geometry.js';
 import { checkbox, deviationInput, field, h, lengthInput, numberInput, select } from './dom.js';
-import { designFaces, faceRef } from '../core/faces.js';
+import { designFaces, faceRef, stubPart } from '../core/faces.js';
+import { notesPanel } from './notesPanel.js';
 import { clearScope, faceSummary, packageApplier, packageManager, quickApply, quickRemove } from './trimPanels.js';
 import { floorPanel } from './floorPanel.js';
 import { furniturePanel, layoutPanel } from './layoutPanel.js';
@@ -33,6 +34,7 @@ export class Inspector {
     if (this.app.tab === 'trim') body = this.app.faceEditor.panel();
     else if (this.app.plan.tool === 'level') body = this.levelPanel(analysis);
     else if (this.app.plan.tool === 'measure') body = this.measurePanel();
+    else if (this.app.plan.tool === 'annotate' || selection?.type === 'annotation') body = notesPanel(this.app, selection);
     else if (this.app.plan.tool === 'layout' && (this.app.plan.placing || selection?.type !== 'furniture')) body = layoutPanel(this.app, analysis);
     else if (selection?.type === 'furniture') body = furniturePanel(this.app, analysis, selection.id);
     else if (this.app.plan.showFlooring && (!selection || (selection.type === 'room' && !analysis.rooms.find((g) => g.room?.id === selection.id)?.dead))) {
@@ -48,7 +50,7 @@ export class Inspector {
   }
 
   focus(hit) {
-    const target = hit?.type === 'room' ? 'input[name=room-name]' : hit?.type === 'wall' ? 'input[name=wall-length]' : 'input';
+    const target = hit?.type === 'room' ? 'input[name=room-name]' : hit?.type === 'wall' ? 'input[name=wall-length]' : hit?.type === 'annotation' ? 'textarea' : 'input';
     const input = this.el.querySelector(target);
     input?.focus();
     input?.select?.();
@@ -80,7 +82,6 @@ export class Inspector {
         'Face to face, as built: the length of each wall face to its corners'),
       h('div', { class: 'fl-summary' }, h('span', { class: 'muted' }, 'Ruler guides: '), d.guides.length ? `${d.guides.length}` : 'none',
         d.guides.length ? h('button', { class: 'link danger', onclick: () => this.edit('Clear guides', (x) => { x.guides = []; }) }, ' Clear all') : null),
-      checkbox('Show trim on the plan', d.settings.showTrim !== false, (v) => this.edit(v ? 'Show trim' : 'Hide trim', (x) => { x.settings.showTrim = v; })),
       h('h3', {}, 'Trim (whole house)'),
       quickApply(this.app, {}, 'house', { tray: analysis.rooms.some((g) => resolveRoomCeiling(d, g.room).type === 'tray') }),
       quickRemove(this.app, {}, 'house'),
@@ -208,7 +209,7 @@ export class Inspector {
     const target = { roomId };
     return [
       h('ul', { class: 'wall-list' }, faces.map((f) => h('li', {},
-        h('button', { class: 'link', onclick: () => this.app.openFace(faceRef(f)) }, `${f.number}. ${f.compass}`),
+        h('button', { class: 'link', onclick: () => this.app.openFace(faceRef(f)) }, f.stub ? `${f.number}. Stub ${stubPart(f)}` : `${f.number}. ${f.compass}`),
         h('span', { class: 'muted small' }, faceSummary(d, f) || 'no trim'),
         h('button', { class: 'link', onclick: () => this.app.openFace(faceRef(f)) }, 'Edit')))),
       h('p', { class: 'muted small' }, 'Add to every wall of this room (one Undo):'),
@@ -272,9 +273,11 @@ export class Inspector {
     const editWall = (label, fn) => this.edit(label, (x) => fn(x.walls.find((ww) => ww.id === wallId)));
 
     // Face lengths (to the corners) on each side: what gets measured and built. Editing one stretches the plan like the centreline does.
-    const faces = facesOfWall(analysis, wallId);
+    // The end of a stub wall is as long as the wall is thick, so it isn't a length to edit.
+    const faces = facesOfWall(analysis, wallId).filter((face) => face.stub !== 'end');
     const sides = faces.map((face, i) => {
-      const name = face.room ? `${face.room.dead ? 'Dead space' : face.room.room?.name ?? 'Room'} side (${face.compass.toLowerCase()} wall)` : `Exterior (${face.compass.toLowerCase()} face)`;
+      const roomName = face.room ? (face.room.dead ? 'Dead space' : face.room.room?.name ?? 'Room') : '';
+      const name = face.stub ? `${roomName} (${stubPart(face)} of the stub)` : face.room ? `${roomName} side (${face.compass.toLowerCase()} wall)` : `Exterior (${face.compass.toLowerCase()} face)`;
       return field(name, lengthInput(face.length, u, (mm) => {
         this.edit('Wall length', (x) => setWallLength(x, wallId, L + (mm - face.length)));
       }, { min: 1, name: i === 0 ? 'wall-length' : undefined }), face.wallIds.length > 1 ? 'This face spans several wall segments' : null);
@@ -299,7 +302,7 @@ export class Inspector {
       }, (v) => editWall('Wall type', (ww) => { ww.exterior = v; }))),
       wallFaces.length ? h('h3', {}, 'Trim') : null,
       wallFaces.length ? h('div', { class: 'button-row' }, wallFaces.map((f) => h('button', { onclick: () => this.app.openFace(faceRef(f)), title: faceSummary(d, f) || 'No trim yet' },
-        `Edit trim · ${f.kind === 'room' ? `${f.room.room?.name ?? 'Room'} side` : 'exterior side'}`))) : null,
+        `Edit trim · ${f.stub ? `stub ${stubPart(f)}` : f.kind === 'room' ? `${f.room.room?.name ?? 'Room'} side` : 'exterior side'}`))) : null,
       openings.length ? h('h3', {}, 'Openings in this wall') : null,
       openings.length ? h('ul', { class: 'wall-list' }, openings.map((o) => h('li', {},
         h('button', { class: 'link', onclick: () => this.app.select({ type: 'opening', id: o.id }) }, OPENING_TYPES[o.type]),
@@ -390,7 +393,7 @@ export class Inspector {
     const editWalls = (label, fn) => this.edit(label, (x) => x.walls.filter((w) => wallIds.has(w.id)).forEach(fn));
     const typeOptions = { auto: 'Auto-detect', yes: 'Exterior – insulate', no: 'Interior – no insulation' };
     if (type == null) typeOptions[''] = 'Mixed';
-    const parts = [['wall', 'Walls'], ['opening', 'Openings'], ['room', 'Rooms'], ['node', 'Corners'], ['guide', 'Guides'], ['furniture', 'Furniture']].filter(([t]) => count(t));
+    const parts = [['wall', 'Walls'], ['opening', 'Openings'], ['room', 'Rooms'], ['node', 'Corners'], ['guide', 'Guides'], ['furniture', 'Furniture'], ['annotation', 'Notes']].filter(([t]) => count(t));
     return h('div', { class: 'panel' },
       h('div', { class: 'panel-kicker' }, 'Multiple selection'),
       h('h2', {}, `${items.length} items selected`),
